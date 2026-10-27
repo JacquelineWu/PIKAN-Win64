@@ -1,0 +1,26 @@
+## .NET / WPF 构建产物
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+*.user
+*.suo
+.vs/
+*.dll
+*.pdb
+*.cache
+*.log
+
+## 发布产物
+publish/
+*.exe
+!App.xaml
+
+## IDE
+.idea/
+.vscode/
+*.DotSettings.user
+
+## 系统
+Thumbs.db
+Desktop.ini

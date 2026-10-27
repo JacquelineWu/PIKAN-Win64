@@ -1,0 +1,48 @@
+<Application x:Class="PIKAN.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Application.Resources>
+        <!-- 顶栏 / 控制条通用扁平按钮 -->
+        <Style x:Key="ToolButton" TargetType="Button">
+            <Setter Property="Foreground" Value="#e8ecf4" />
+            <Setter Property="Background" Value="#2a2f3a" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Height" Value="30" />
+            <Setter Property="Padding" Value="10,0" />
+            <Setter Property="Margin" Value="3" />
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="SnapsToDevicePixels" Value="True" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="6"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#39404f" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#4fd1c5" />
+                                <Setter TargetName="Bd" Property="TextElement.Foreground" Value="#101216" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.4" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 左侧控制条里的按钮：横向撑满 -->
+        <Style x:Key="PaneButton" TargetType="Button" BasedOn="{StaticResource ToolButton}">
+            <Setter Property="HorizontalAlignment" Value="Stretch" />
+        </Style>
+    </Application.Resources>
+</Application>

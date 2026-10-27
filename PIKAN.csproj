@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>PIKAN</AssemblyName>
+    <RootNamespace>PIKAN</RootNamespace>
+    <Version>1.0.0</Version>
+    <FileVersion>1.0.0</FileVersion>
+    <Company>JacquelineWu (flyercat)</Company>
+    <Product>PIKAN</Product>
+    <Description>PIKAN Windows 版 - 原生 HEIC/JPG 看图软件（ACDSee 风格）</Description>
+    <Copyright>Copyright (c) 2026 JacquelineWu (flyercat)</Copyright>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <!--
+    日常开发：dotnet build  →  框架依赖的 PIKAN.exe（需本机装 .NET 10 桌面运行时）
+    分发单文件：dotnet publish -c Release -r win-x64 -p:SelfContained=true -p:PublishSingleFile=true
+                →  约 70MB 的独立 exe，目标机无需装 .NET
+    （自包含需要联网拉 Microsoft.WindowsDesktop.App.Runtime.win-x64 运行时包，故不写死在 csproj 里）
+  -->
+
+</Project>
