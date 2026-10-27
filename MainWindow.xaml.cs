@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Threading;
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
@@ -74,9 +75,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // 早期版本这里有「大模糊 → 分档对焦 → 淡出」的动画，已按需求移除：
     // 现在切图是瞬时替换，不做任何模糊/缩放/淡入淡出。
 
-    // ---- 滚轮去抖 / 合并 ----
-    private const long WheelNotchMs = 60;
-    private const long WheelStepMs = 120;
+    // ---- 滚轮 ----
+    // 一个物理刻度 = Delta 120。攒够一格就立刻翻，不做任何定时节流。
+    private const int WheelNotch = 120;
+    // 停手这么久就清零累积：避免半格的零头被带到下一次滚动里，
+    // 让「滚一点、停一下、再滚一点」每次都从干净状态开始。
+    private const long WheelAccumResetMs = 400;
 
     // ---- 其它 ----
     private const int SlideIntervalMs = 3000;
@@ -94,7 +98,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private readonly DispatcherTimer _slideTimer = new();
     private readonly DispatcherTimer _posTimer = new() { Interval = TimeSpan.FromMilliseconds(PosSaveMs) };
-    private readonly DispatcherTimer _wheelTimer = new() { Interval = TimeSpan.FromMilliseconds(16) };
 
     // ---- 档案 ----
     private string _sourceLabel = "尚未打开";
@@ -126,12 +129,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private double _baseTx;
     private double _baseTy;
 
-    // ---- 滚轮合并 ----
-    private long _lastWheelMs;
-    private int _lastWheelSign;
-    private int _pendingDelta;
-    private long _lastSwitchMs;
+    // ---- 滚轮 ----
+    private int _wheelAccum;
+    private long _wheelAccumMs;
     private bool _wheelCtrl;
+
+    /// <summary>
+    /// 解码并发闸门。
+    /// 以前靠「滚轮每 120ms 最多翻一张」来防止快速滚动时解码任务堆积，
+    /// 但那正是滚轮比键盘慢的原因（实测每次切换要排队 40~125ms）。
+    /// 现在翻页不再节流，改由这里限制同时进行的解码数量：排队的任务拿到闸门时
+    /// 若发现自己已经过期（token 变了），直接放弃，不做无用功。
+    /// </summary>
+    private static readonly SemaphoreSlim DecodeGate = new(2);
 
     // ---- 主视图 / 过渡层 ----
     private long _curToken;
@@ -180,7 +190,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _slideTimer.Interval = TimeSpan.FromMilliseconds(SlideIntervalMs);
         _slideTimer.Tick += (_, _) => Go(1);
         _posTimer.Tick += (_, _) => { _posTimer.Stop(); FlushPos(); };
-        _wheelTimer.Tick += (_, _) => { _wheelTimer.Stop(); FlushWheel(); };
 
         Loaded += (_, _) => UpdateTransform();
         Closed += (_, _) => Perf.FlushSync();
@@ -893,25 +902,38 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>低清占位：仅在预载未命中时用，与主视图解码并行。</summary>
     private async Task LoadQuickAsync(string path, long token)
     {
-        Stopwatch sw = Stopwatch.StartNew();
-        DecodedImage? q = await Task.Run(() => Decoder.Decode(path, PreviewCache.QuickEdge));
-        Perf.Span("  解码 低清 768", sw.ElapsedMilliseconds);
         if (token != _curToken)
-        {
-            return; // 解码期间又切了图 → 丢弃
-        }
-
-        if (q is null)
         {
             return;
         }
 
-        if (MainImage.Source is null)
+        await DecodeGate.WaitAsync();
+        try
         {
-            StartFocus(q);
-        }
+            if (token != _curToken)
+            {
+                return; // 排队期间又切了图 → 不必再解
+            }
 
-        _previews.Add(q, MainImage.Source, LowImage.Source);
+            Stopwatch sw = Stopwatch.StartNew();
+            DecodedImage? q = await Task.Run(() => Decoder.Decode(path, PreviewCache.QuickEdge));
+            Perf.Span("  解码 低清 768", sw.ElapsedMilliseconds);
+            if (token != _curToken || q is null)
+            {
+                return; // 解码期间又切了图 → 丢弃
+            }
+
+            if (MainImage.Source is null)
+            {
+                StartFocus(q);
+            }
+
+            _previews.Add(q, MainImage.Source, LowImage.Source);
+        }
+        finally
+        {
+            DecodeGate.Release();
+        }
     }
 
     /// <summary>
@@ -931,9 +953,26 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         int edge = ViewEdge();
-        Stopwatch sw = Stopwatch.StartNew();
-        DecodedImage? ret = await Task.Run(() => Decoder.Decode(path, edge));
-        Perf.Span($"  解码 全清 edge={edge}", sw.ElapsedMilliseconds);
+
+        // 并发闸门：快速翻页时最多 2 个解码在跑，排队的那个一旦发现自己已经过期
+        // （token 变了）就直接放弃，不再做无用功。这是原先「滚轮节流」的真正替代者。
+        await DecodeGate.WaitAsync();
+        DecodedImage? ret;
+        try
+        {
+            if (token != _curToken)
+            {
+                return; // 排队期间又切了图 → 不必再解
+            }
+
+            Stopwatch sw = Stopwatch.StartNew();
+            ret = await Task.Run(() => Decoder.Decode(path, edge));
+            Perf.Span($"  解码 全清 edge={edge}", sw.ElapsedMilliseconds);
+        }
+        finally
+        {
+            DecodeGate.Release();
+        }
 
         if (token != _curToken)
         {
@@ -1405,18 +1444,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // ==================================================================
 
     /// <summary>
-    /// 滚轮翻页：去抖 + 合并。
-    /// 不能「来一个事件就翻一张」—— 一个物理刻度会连发多个事件，
-    /// 且快速滚动时事件频率远高于解码速度，逐张切换会让解码队列堆积，
-    /// 表现就是图片错位。这里把窗口内攒下的步数合并成一次跳转，只渲染最终落点那一张。
+    /// 滚轮翻页：按累积的滚动量翻，攒够一个物理刻度（Delta 120）就立刻翻一张。
+    ///
+    /// 这里刻意不再做定时节流。早先的写法是「每 120ms 最多翻一张」，
+    /// 后果就是滚轮比键盘明显慢——键盘是直接调 Go()，而滚轮每次都要排队
+    /// 等定时器（实测快速连滚时每次切换被推迟 40~125ms，还会攒成一次跳 2~3 张）。
+    /// 如今切图同步只要 0~2ms、命中预载缓存即刻上屏，「怕解码堆积」已不该由
+    /// 翻页节流来兜底，改交给 DecodeGate 限制并发。
+    ///
+    /// 按 Delta 累积（而非「一个事件一张」）是必要的：
+    /// 一个物理刻度会连发好几个事件，触控板更是密集的小 Delta，
+    /// 逐事件翻页会一滚飞掉几十张。
     /// </summary>
     private void CanvasArea_MouseWheel(object sender, MouseWheelEventArgs e)
     {
         e.Handled = true;
         _wheelCtrl = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
-
-        // 约定：向上滚（Delta > 0）= 上一张
-        int dir = e.Delta > 0 ? -1 : 1;
 
         // 翻页用的滚轮一动就把画布拉回正中；Ctrl + 滚轮是缩放，平移量要留着当锚点
         if (!_wheelCtrl)
@@ -1425,53 +1468,43 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _ty = 0;
         }
 
-        long now = Environment.TickCount64;
-        if (dir == _lastWheelSign && now - _lastWheelMs < WheelNotchMs)
-        {
-            return; // 同一刻度的连发事件合并成一步
-        }
-
-        _lastWheelSign = dir;
-        _lastWheelMs = now;
-        _pendingDelta += dir;
-        FlushWheel();
-    }
-
-    private void FlushWheel()
-    {
-        if (_pendingDelta == 0 || _wheelTimer.IsEnabled)
-        {
-            return;
-        }
-
-        long wait = WheelStepMs - (Environment.TickCount64 - _lastSwitchMs);
-        if (wait > 0)
-        {
-            _wheelTimer.Interval = TimeSpan.FromMilliseconds(wait);
-            _wheelTimer.Start();
-            return;
-        }
-
-        int d = _pendingDelta;
-        _pendingDelta = 0;
-        _lastSwitchMs = Environment.TickCount64;
-
+        // Ctrl + 滚轮是缩放，本来就要求跟手，按事件直接走，不做刻度累积
+        // 方向沿用原来的约定：向上滚（Delta > 0）= 放大
         if (_wheelCtrl)
         {
-            ZoomBy(d > 0 ? 0.9 : 1.1);
+            ZoomBy(e.Delta > 0 ? 1.1 : 0.9);
+            return;
         }
-        else
+
+        long now = Environment.TickCount64;
+
+        // 停手超过 400ms，或滚动方向掉头 → 清零累积，从头开始攒
+        if (now - _wheelAccumMs > WheelAccumResetMs ||
+            Math.Sign(e.Delta) != Math.Sign(_wheelAccum))
         {
-            Go(d);
+            _wheelAccum = 0;
         }
+
+        _wheelAccumMs = now;
+        _wheelAccum += e.Delta;
+
+        int notches = _wheelAccum / WheelNotch;
+        if (notches == 0)
+        {
+            return; // 还不够一格，攒着
+        }
+
+        _wheelAccum -= notches * WheelNotch;
+
+        // 约定：向上滚（Delta > 0）= 上一张
+        Perf.Note($"wheel 事件 delta={e.Delta} → 立刻翻 {-notches} 张");
+        Go(-notches);
     }
 
     private void ClearWheel()
     {
-        _wheelTimer.Stop();
-        _pendingDelta = 0;
-        _lastWheelSign = 0;
-        _lastSwitchMs = 0;
+        _wheelAccum = 0;
+        _wheelAccumMs = 0;
     }
 
     private void CanvasArea_MouseDown(object sender, MouseButtonEventArgs e)
@@ -1866,6 +1899,48 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
 
             await Task.Delay(1500);
+        }
+
+        // 滚轮轮：抛真实的 MouseWheel 路由事件，走与用户滚滚轮完全相同的代码路径。
+        // 间隔刻意压到 40 ms（人手连滚的真实节奏），这样才会踩到滚轮的节流窗口；
+        // 用 350 ms 的慢间隔测就等于没测——节流窗口根本不会被触发。
+        await Task.Delay(1500);
+
+        // 先跳到一段完全没有预载的区域：这里每一张都要现解，是最容易触发解码风暴的场景。
+        // 把「未命中 + 快速连滚」放进同一个测试，才能验证 DecodeGate 真的兜住了。
+        Perf.Note("==== bench 冷区轮：跳到未预载处后立即连续快滚 ====");
+        await Dispatcher.InvokeAsync(() => Go(80));
+        await Task.Delay(300);
+
+        for (int i = 0; i < steps; i++)
+        {
+            await Dispatcher.InvokeAsync(() =>
+            {
+                MouseWheelEventArgs e = new(Mouse.PrimaryDevice, Environment.TickCount, -120)
+                {
+                    RoutedEvent = UIElement.MouseWheelEvent,
+                    Source = CanvasArea
+                };
+                CanvasArea.RaiseEvent(e);
+            });
+            await Task.Delay(40);
+        }
+
+        await Task.Delay(1500);
+        Perf.Note("==== bench 滚轮轮：连续快速滚轮（真实事件 · 间隔 40 ms）====");
+
+        for (int i = 0; i < steps; i++)
+        {
+            await Dispatcher.InvokeAsync(() =>
+            {
+                MouseWheelEventArgs e = new(Mouse.PrimaryDevice, Environment.TickCount, -120)
+                {
+                    RoutedEvent = UIElement.MouseWheelEvent,
+                    Source = CanvasArea
+                };
+                CanvasArea.RaiseEvent(e);
+            });
+            await Task.Delay(40);
         }
 
         await Task.Delay(5000); // 等最后一次全清 / 精修落定
