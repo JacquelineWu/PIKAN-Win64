@@ -20,11 +20,18 @@ public partial class App : Application
         TaskScheduler.UnobservedTaskException += (_, a) => { Report(a.Exception); a.SetObserved(); };
 
         // --nogpu：强制走 CPU 渲染，便于对比画质 / 排查 GPU 相关问题
+        // --bench：连续翻页采集分段耗时（写 perf.log），测完自动退出
+        bool bench = false;
         foreach (string a in e.Args)
         {
             if (string.Equals(a, "--nogpu", StringComparison.OrdinalIgnoreCase))
             {
                 GpuResampler.Enabled = false;
+            }
+            else if (string.Equals(a, "--bench", StringComparison.OrdinalIgnoreCase))
+            {
+                bench = true;
+                Perf.Enabled = true;
             }
         }
 
@@ -37,9 +44,25 @@ public partial class App : Application
         window.Activate();
 
         // 支持命令行 / 资源管理器「打开方式」：PIKAN.exe <图片文件 或 文件夹>
-        if (e.Args.Length > 0)
+        // （-- 开头的开关不算路径）
+        string? openPath = null;
+        foreach (string a in e.Args)
         {
-            window.OpenPath(e.Args[0]);
+            if (!a.StartsWith("--", StringComparison.Ordinal))
+            {
+                openPath = a;
+                break;
+            }
+        }
+
+        if (openPath is not null)
+        {
+            window.OpenPath(openPath);
+        }
+
+        if (bench)
+        {
+            _ = window.BenchAsync(20, 350);
         }
     }
 

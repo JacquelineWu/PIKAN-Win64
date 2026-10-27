@@ -23,7 +23,7 @@ public sealed class PreviewCache
 {
     public const int QuickEdge = 768;      // 未命中缓存时的低清占位档位（单张约 1.7MB）
     public const int MinEdge = 1024;       // 预载档位下限
-    public const int MaxEdge = 1280;       // 预载档位上限：再大 41 张就吃掉几百 MB 内存
+    public const int MaxEdge = 1536;       // 预载档位上限：41 张 × 约 7MB ≈ 290MB，再大就吃不消了
     public const int Capacity = 48;        // 窗口 41 张，留 7 张余量
     public const long MaxBytes = 320L * 1024 * 1024;
 

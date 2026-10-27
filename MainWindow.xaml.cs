@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
@@ -60,8 +61,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// </summary>
     private const int UpgradeDelayMs = 250;
 
-    /// <summary>主视图解码的长边下限 / 上限（按「画布长边 × 2」取，放大到 200% 仍清晰）。</summary>
-    private const int ViewEdgeMin = 1600;
+    /// <summary>
+    /// 主视图解码的长边下限 / 上限。
+    /// 系数取 1.5 而不是 2：画布 985 时全清要解 1971px，一张大图能解到 1.5 秒，
+    /// 而屏幕实际只需要约 1196px——多出来的像素既不显示又拖慢切图。
+    /// </summary>
+    private const double ViewEdgeFactor = 1.5;
+    private const int ViewEdgeMin = 1200;
     private const int ViewEdgeMax = 4096;
 
     // ---- 切图过渡：低清图立刻顶上 → 清晰图就绪后直接替换。
@@ -177,6 +183,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _wheelTimer.Tick += (_, _) => { _wheelTimer.Stop(); FlushWheel(); };
 
         Loaded += (_, _) => UpdateTransform();
+        Closed += (_, _) => Perf.FlushSync();
+
+        // 帧间隔监控：UI 线程被冻结多久会直接体现成"顿一下"
+        Perf.AttachFrameMonitor();
+
         ReadLastPos();
     }
 
@@ -735,14 +746,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         int n = _items.Count;
+
+        Perf.Start($"Go {delta}  → 第 {((_cur + delta) % n + n) % n + 1} 张");
         _cur = ((_cur + delta) % n + n) % n;
         ResetView();
+        Perf.Tick("ResetView");
         LoadMeta(_cur);
+        Perf.Tick("LoadMeta");
         ShowPreviewOf(_cur);
+        Perf.Tick("ShowPreviewOf");
         UpdateSelection();
+        Perf.Tick("UpdateSelection（含 ScrollIntoView）");
         Status = $"第 {_cur + 1} / {n} 张";
         SchedulePreload();
+        Perf.Tick("SchedulePreload");
         MarkPos();
+        Perf.Tick("MarkPos");
     }
 
     private void UpdateSelection()
@@ -765,11 +784,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // 主视图与过渡层
     // ==================================================================
 
-    /// <summary>主视图解码的长边：画布长边 × 2，并夹在 [1600, 4096] 内控制内存。</summary>
+    /// <summary>主视图解码的长边：画布长边 × ViewEdgeFactor，并夹在 [ViewEdgeMin, 4096] 内控制内存。</summary>
     private int ViewEdge()
     {
         double baseEdge = Math.Max(CanvasArea.ActualWidth, CanvasArea.ActualHeight);
-        return (int)Math.Max(ViewEdgeMin, Math.Min(ViewEdgeMax, Math.Round(baseEdge * 2)));
+        double dpi = Math.Max(1.0, VisualTreeHelper.GetDpi(this).DpiScaleX);
+        return (int)Math.Max(ViewEdgeMin, Math.Min(ViewEdgeMax, Math.Round(baseEdge * dpi * ViewEdgeFactor)));
     }
 
     /// <summary>
@@ -798,12 +818,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         string path = _items[idx].Path;
         DecodedImage? hit = _previews.Get(path);
+        Perf.Tick("查缓存");
 
         if (hit is not null)
         {
             ShowDecoded(hit); // 预载命中：立刻出图，这是「翻页不等解码」的关键
 
-            if (hit.Edge < ViewEdge() * 0.85)
+            // ShowNeed 依赖 _imgW/_imgH（FitFactor 要用），所以必须等上面这行落定再算
+            int need = ShowNeed(hit);
+            Perf.Note($"  缓存命中 edge={hit.Edge}（显示需 {need}）");
+
+            // 还要不要再解一张全清？只看「屏幕实际要显示多少像素」。
+            // 早先拿缓存档位去和 ViewEdge 比，而 ViewEdge 带 1.5 倍缩放余量，
+            // 于是本已够用的缓存图一律被判成"不够"，每张都要再解一次全清——
+            // 大图那一次能解到 1.5 秒，切图卡顿就是从这儿来的。
+            if (need <= 0 || hit.Edge < need)
             {
                 _ = LoadViewAsync(path, token, UpgradeDelayMs); // 停下来再升到全清
             }
@@ -814,28 +843,46 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
         else
         {
+            Perf.Note($"  缓存未命中 → 低清占位 + 全清解码并行（全清需 {ViewEdge()}）");
             ClearBlur();
             _ = LoadQuickAsync(path, token);   // 低清占位
             _ = LoadViewAsync(path, token, 0); // 尽快拿到全清
         }
     }
 
+    /// <summary>
+    /// 这张图按当前 zoom / DPI 实际要占多少像素（长边），再留 5% 余量。
+    /// 用来判断"缓存里这张够不够看"，够就不必再解全清。
+    /// </summary>
+    private int ShowNeed(DecodedImage img)
+    {
+        (int w, int h) = TargetPixelSize(img);
+        int need = Math.Max(w, h);
+        return need <= 0 ? 0 : (int)Math.Ceiling(need * 1.05);
+    }
+
     /// <summary>把一张已解码的图放上主视图（预载命中 / 高清到达都走这里）。</summary>
     private void ShowDecoded(DecodedImage img)
     {
         NoteShown(img.Path);
+        Perf.Tick("NoteShown");
         _viewOwned = img;
         MainImage.Source = img.Source;
+        Perf.Tick("MainImage.Source 赋值（位图上传 + 布局失效）");
         _imgW = img.Width;
         _imgH = img.Height;
         UpdateTransform();
+        Perf.Tick("UpdateTransform");
         RefreshImageInfo();
+        Perf.Tick("RefreshImageInfo");
     }
 
     /// <summary>低清占位：仅在预载未命中时用，与主视图解码并行。</summary>
     private async Task LoadQuickAsync(string path, long token)
     {
+        Stopwatch sw = Stopwatch.StartNew();
         DecodedImage? q = await Task.Run(() => Decoder.Decode(path, PreviewCache.QuickEdge));
+        Perf.Span("  解码 低清 768", sw.ElapsedMilliseconds);
         if (token != _curToken)
         {
             return; // 解码期间又切了图 → 丢弃
@@ -871,7 +918,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         int edge = ViewEdge();
+        Stopwatch sw = Stopwatch.StartNew();
         DecodedImage? ret = await Task.Run(() => Decoder.Decode(path, edge));
+        Perf.Span($"  解码 全清 edge={edge}", sw.ElapsedMilliseconds);
 
         if (token != _curToken)
         {
@@ -938,7 +987,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         BitmapSource? refined;
         try
         {
+            Stopwatch sw = Stopwatch.StartNew();
             refined = await Task.Run(() => GpuResampler.Resize(src.Source, w, h));
+            Perf.Span($"  GPU 重采样 {src.Source.PixelWidth}x{src.Source.PixelHeight} → {w}x{h}", sw.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
@@ -958,6 +1009,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         MainImage.Source = refined;
+        Perf.Tick("精修结果上屏");
     }
 
     /// <summary>当前 zoom / 旋转 / DPI 下，这张图实际占多少屏幕像素。</summary>
@@ -1618,8 +1670,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return PreviewCache.MinEdge;
         }
 
-        int v = (int)Math.Clamp(edge * 1.15, PreviewCache.MinEdge, PreviewCache.MaxEdge);
-        return Math.Max(PreviewCache.MinEdge, (int)(Math.Round(v / 256.0) * 256));
+        // 必须向上取整：向下会把 1133 量化成 1024，反而小于屏幕实际要显示的 1196，
+        // 于是每张命中缓存的图都还得再解一次全清才能看——那才是切图卡顿的真正来源。
+        // 另外要乘 DPI：ActualWidth 是逻辑像素，高分屏上真实像素还要再放大一倍多。
+        double dpi = Math.Max(1.0, VisualTreeHelper.GetDpi(this).DpiScaleX);
+        int v = (int)(Math.Ceiling(edge * dpi * 1.15 / 256.0) * 256);
+        return Math.Clamp(v, PreviewCache.MinEdge, PreviewCache.MaxEdge);
     }
 
     // ==================================================================
@@ -1736,6 +1792,29 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 : $"CPU 渲染 · {GpuAccel.FailReason}";
 
         ScheduleRefine();
+    }
+
+    /// <summary>
+    /// 性能自测（命令行 --bench）：连续翻页若干张，各段耗时写入 perf.log 后自动退出。
+    /// 走的是和键盘翻页完全相同的 Go() 路径，所以测到的就是真实体感链路。
+    /// </summary>
+    public async Task BenchAsync(int steps, int intervalMs)
+    {
+        await Task.Delay(6000); // 等启动、预载铺开
+        Perf.Note($"==== bench 开始：{steps} 张 / 间隔 {intervalMs} ms ====");
+
+        for (int i = 0; i < steps; i++)
+        {
+            await Dispatcher.InvokeAsync(() => Go(1));
+            await Task.Delay(intervalMs);
+        }
+
+        await Task.Delay(5000); // 等最后一次全清 / 精修落定
+        Perf.Note("==== bench 结束 ====");
+        Perf.FlushSync();
+        await Task.Delay(800);
+
+        await Dispatcher.InvokeAsync(Close);
     }
 
     /// <summary>
