@@ -13,6 +13,8 @@ obj/
 
 ## 发布产物
 publish/
+portable/
+_extract/
 *.exe
 !App.xaml
 

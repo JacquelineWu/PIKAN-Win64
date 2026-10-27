@@ -71,7 +71,7 @@ bin\Release\net10.0-windows\PIKAN.exe
 
 ### 独立单文件 exe（可拷到任意 Win64 机器）
 
-仓库根目录的 **`PIKAN.exe`（约 66 MB）** 就是自包含单文件版本：**目标机不用装 .NET，不用装 CUDA Toolkit，
+仓库根目录的 **`PIKAN.exe`（约 69 MB）** 就是自包含单文件版本：**目标机不用装 .NET，不用装 CUDA Toolkit，
 不依赖任何外部文件**——双击即用，拷到 U 盘也行。
 
 重新生成：
@@ -94,6 +94,47 @@ copy bin\Release\net10.0-windows\win-x64\publish\PIKAN.exe PIKAN.exe
   如果想换 kernel 调试，在 exe 旁边放 `Kernels\pikan.ptx` 会优先用外部的。
 - 目标机上 GPU 加速要生效，需要 NVIDIA 驱动（Volta 及以上）；否则自动回落 CPU，功能不受影响。
 - 看 HEIC 需要目标机装微软的 **HEIF Image Extension**（微软商店免费）。
+
+### 便携版（免自解压，打不开时的首选）
+
+`portable\PIKAN.exe` 是**自包含多文件版**（整个目录约 155 MB）：目标机不用装 .NET，
+而且**不做运行时自解压**——不往 `%TEMP%` 写一个字节，双击即开。
+把整个 `portable` 文件夹拷到 U 盘 / 别的 Win64 机器就能用，已签名。
+
+```bat
+dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false ^
+  -p:DebugType=none -p:SatelliteResourceLanguages=en -o portable
+
+pwsh .\Sign.ps1 -Exe portable\PIKAN.exe
+```
+
+单文件版胜在"就一个文件"，便携版胜在"一定能开"。两个都留着。
+
+### 双击后毫无反应 / 闪退怎么办
+
+单文件 exe 启动时要把 WPF 的 native 组件解压到临时目录；这一步若被安全软件或目录权限拦住，
+进程会在托管代码**之前**就退出。WPF 程序没有控制台，错误文本无处显示，
+所以表现就是「双击后什么都没发生」。
+
+先确认是否中招——在 PowerShell 里跑一次，能直接看到原因：
+
+```powershell
+& .\PIKAN.exe 2>&1
+# Failure processing application bundle.
+# Failed to create directory [...] for extracting bundled files. Error code: 5   ← 就是它
+```
+
+三种解法，任选其一：
+
+| 解法 | 做法 |
+|---|---|
+| 用便携版（最省事） | 双击 `portable\PIKAN.exe`，完全不走自解压 |
+| 换提取目录 | `setx DOTNET_BUNDLE_EXTRACT_BASE_DIR "%LOCALAPPDATA%\PIKAN\Extract"`，然后**注销重登录**（或重启资源管理器）再双击 |
+| 清旧缓存 | `rmdir /s %TEMP%\.net\PIKAN`（提取缓存可安全删除，下次运行会重建） |
+
+程序侧也已加固：凡是进入了 `App` 之后的未处理异常，都会弹窗提示并写入
+`%LOCALAPPDATA%\PIKAN\crash.log`，不会再"静默闪退"；CUDA 探测也挪到了后台线程，
+驱动初始化再慢也不会拖住窗口显示。
 
 ### SmartScreen 拦截怎么办
 
@@ -247,3 +288,13 @@ resize ok #1   1200x900 -> 1107x830         ← Mitchell 精修
 
 即：单文件自解压正常、嵌入的 PTX 读得到、CUDA 初始化 → 预载 → 精修全链路走通
 （日志里已无 `blur`：切图模糊动画取消后不再调用 GPU 模糊）。
+
+补充：本机后来出现过单文件版自解压被拒（`Error code: 5`，静默退出、双击毫无反应），
+原因是这台机器的 `%TEMP%` 不允许创建提取目录。同一份 exe 只要把提取目录换到别处
+（`DOTNET_BUNDLE_EXTRACT_BASE_DIR`）就能正常启动，**便携版则完全不受影响**——
+这也是仓库里同时保留 `portable\` 的原因。详见「双击后毫无反应 / 闪退怎么办」。
+
+### 便携版验证
+
+`portable\PIKAN.exe` 双击直接起窗口（标题 `PIKAN`，工作集约 350 MB），
+不写 `%TEMP%`、不需要目标机装 .NET，CUDA 链路与单文件版一致。

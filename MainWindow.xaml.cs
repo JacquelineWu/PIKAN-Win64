@@ -163,8 +163,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         // 先探一次 GPU：CUDA 上下文创建 + PTX JIT 有几十毫秒开销，放在启动时做，
         // 避免第一次切图才初始化导致卡顿。失败也只是安静降级。
-        GpuAccel.Touch();
-        RefreshGpu();
+        //
+        // 必须放在后台线程：个别机器上驱动初始化会明显变慢甚至卡住，同步跑在 UI 线程
+        // 会把窗口的首次显示一起拖住，表现出来就是「双击后毫无反应」。
+        InitGpuAsync();
 
         MainImage.RenderTransform = _mainScale;
         LowImage.RenderTransform = _lowScale;
@@ -1734,6 +1736,27 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 : $"CPU 渲染 · {GpuAccel.FailReason}";
 
         ScheduleRefine();
+    }
+
+    /// <summary>
+    /// 后台探测 GPU，完成后刷新状态栏角标。
+    /// 探测失败只按 CPU 渲染处理，绝不影响窗口显示。
+    /// </summary>
+    private void InitGpuAsync()
+    {
+        _ = System.Threading.Tasks.Task.Run(() =>
+        {
+            try
+            {
+                GpuAccel.Touch();
+            }
+            catch
+            {
+                // 驱动异常一律降级为 CPU 渲染
+            }
+
+            _ = Dispatcher.BeginInvoke(new Action(RefreshGpu));
+        });
     }
 
     private void RefreshGpu()
