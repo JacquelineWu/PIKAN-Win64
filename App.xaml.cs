@@ -33,6 +33,12 @@ public partial class App : Application
                 bench = true;
                 Perf.Enabled = true;
             }
+            else if (string.Equals(a, "--novram", StringComparison.OrdinalIgnoreCase))
+            {
+                // A/B 对照用：关掉显存常驻 + 结果缓存，回到「每次都上传重算」的旧路径
+                GpuImageCache.Enabled = false;
+                GpuResampler.ResultCacheEnabled = false;
+            }
         }
 
         base.OnStartup(e);

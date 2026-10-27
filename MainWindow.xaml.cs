@@ -236,19 +236,28 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // GPU 加速
     // ==================================================================
 
-    public string GpuLabel => GpuResampler.GpuActive ? "CUDA" : "CPU";
+    public string GpuLabel => GpuResampler.GpuReady ? "CUDA" : "CPU";
 
-    public string GpuBackground => GpuResampler.GpuActive ? "#3ddc84" : "#2a2f3a";
+    // 界面上一律用 GpuReady / StatusTextReady（不触发 CUDA 初始化）：
+    // 初始化要 1~2 秒，UI 线程同步等它会直接冻结窗口，实测启动那一下卡了 2 秒。
+    public string GpuBackground => GpuResampler.GpuReady ? "#3ddc84" : "#2a2f3a";
 
-    public string GpuForeground => GpuResampler.GpuActive ? "#101216" : "#e8ecf4";
+    public string GpuForeground => GpuResampler.GpuReady ? "#101216" : "#e8ecf4";
 
-    public string GpuLine => "x64 · Windows · " + GpuResampler.StatusText;
+    public string GpuLine => "x64 · Windows · " + GpuResampler.StatusTextReady;
 
-    /// <summary>状态栏：已预载并缓存的图片张数与占用。</summary>
+    /// <summary>状态栏：已预载并缓存的图片张数与占用（含显存常驻部分）。</summary>
     public string CacheLabel =>
         _previews.Count > 0
-            ? $"预载 {_previews.Count} 张 · {ImageItem.FormatBytes(_previews.Bytes)}"
+            ? $"预载 {_previews.Count} 张 · {ImageItem.FormatBytes(_previews.Bytes)}{VramPart()}"
             : "预载中";
+
+    private static string VramPart()
+    {
+        long bytes = GpuImageCache.Instance.Bytes;
+        int n = GpuImageCache.Instance.Count;
+        return n > 0 ? $" · 显存 {n} 张 {ImageItem.FormatBytes(bytes)}" : "";
+    }
 
     /// <summary>
     /// 预载张数变化后刷新状态栏（预载链在后台线程，故走 Dispatcher）。
@@ -269,9 +278,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private string _cacheLabelShown = "";
 
-    public string GpuTip => GpuResampler.GpuActive
-        ? $"GPU 加速已开启\n{GpuAccel.DeviceName}\n点击切到 CPU 渲染（Ctrl+G）"
-        : $"当前为 CPU 渲染{(GpuAccel.Available ? "（已手动关闭 GPU）" : "\n" + GpuAccel.FailReason)}\n点击开启 CUDA 加速（Ctrl+G）";
+    public string GpuTip => GpuResampler.GpuReady
+        ? $"GPU 加速已开启\n{GpuAccel.DeviceNameOrEmpty}\n点击切到 CPU 渲染（Ctrl+G）"
+        : $"当前为 CPU 渲染{(GpuAccel.IsReady ? "（已手动关闭 GPU）" : "")}\n点击开启 CUDA 加速（Ctrl+G）";
 
     public string SlideLabel => _playing ? "暂停" : "幻灯片";
     public string SlideBackground => _playing ? "#f6c85f" : "#2a2f3a";
@@ -385,7 +394,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         try
         {
-            if (_snapDirty)
+            // 列表为空时绝不覆盖快照：否则一次「没加载出图」的会话会把上次的图库抹掉，
+            // 下次打开就永远是空列表（之前踩过：强杀进程后重启，图全没了）
+            if (_snapDirty && _items.Count > 0)
             {
                 _snapDirty = false;
                 _state.Snapshot = _items.Take(AppState.SnapshotMax).Select(i => i.Path).ToList();
@@ -493,6 +504,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         ClearBlur();
         _previews.Clear();
         _failed.Clear();
+        GpuImageCache.Instance.Clear();   // 换图库：显存里那批一起释放
+        GpuResampler.ClearResults();
 
         // 接上启动预热的那张：此刻列表已有、cur 已定，交给缓存后 showPreviewOf 会直接命中
         if (_warm is not null)
@@ -988,8 +1001,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         try
         {
             Stopwatch sw = Stopwatch.StartNew();
-            refined = await Task.Run(() => GpuResampler.Resize(src.Source, w, h));
-            Perf.Span($"  GPU 重采样 {src.Source.PixelWidth}x{src.Source.PixelHeight} → {w}x{h}", sw.ElapsedMilliseconds);
+            refined = await Task.Run(() => GpuResampler.ResizeCached(src.Path, src.Source, w, h, src.Edge));
+            Perf.Span($"  GPU 重采样[{GpuResampler.LastFrom}] {src.Source.PixelWidth}x{src.Source.PixelHeight} → {w}x{h}",
+                      sw.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
@@ -1099,6 +1113,25 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // 后台预载
     // ==================================================================
 
+    /// <summary>当前预载窗口内的所有路径（给显存缓存做滑动淘汰用）。</summary>
+    private HashSet<string> WindowPaths()
+    {
+        HashSet<string> set = new(StringComparer.OrdinalIgnoreCase);
+        if (_cur < 0 || _items.Count == 0)
+        {
+            return set;
+        }
+
+        int lo = Math.Max(0, _cur - PreloadBack);
+        int hi = Math.Min(_items.Count - 1, _cur + PreloadFwd);
+        for (int i = lo; i <= hi; i++)
+        {
+            set.Add(_items[i].Path);
+        }
+
+        return set;
+    }
+
     private void SchedulePreload()
     {
         // 画布尺寸变了 → 预载清晰度档位跟着变，旧档位的缓存作废重解
@@ -1107,9 +1140,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             _previews.Edge = want;
             _previews.Clear(MainImage.Source, LowImage.Source);
+            // 档位变了 → 显存里那批是旧档位，一起作废，否则会一直命中错的清晰度
+            GpuImageCache.Instance.Clear();
+            GpuResampler.ClearResults();
         }
 
         _previews.EvictOutside(_items, _cur, PreloadBack, PreloadFwd, MainImage.Source, LowImage.Source);
+        GpuImageCache.Instance.EvictOutside(WindowPaths());
         NotifyCache();
         _preloadSeq++;
         if (_preloadBusy)
@@ -1175,7 +1212,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     {
                         _preloadLoggedAt = now;
                         GpuAccel.WriteLog(
-                            $"preload ready  {_previews.Count} 张 · {_previews.Bytes / (1024 * 1024)} MB · edge={_previews.Edge}");
+                            $"preload ready  {_previews.Count} 张 · {_previews.Bytes / (1024 * 1024)} MB · edge={_previews.Edge}" +
+                            $" · 显存 {GpuImageCache.Instance.Count} 张 {GpuImageCache.Instance.Bytes / (1024 * 1024)} MB");
                     }
 
                     return; // 窗口内都预载好了
@@ -1191,6 +1229,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 if (entry is not null)
                 {
                     _previews.Add(entry, MainImage.Source, LowImage.Source);
+
+                    // 顺手把这张图传进显存常驻：等真翻到它时，精修直接从显存取源，
+                    // 不用再 CopyPixels + 上传。上传失败无所谓，走常规路径即可。
+                    GpuImageCache.Instance.Put(entry.Path, entry.Source, _previews.Edge);
+
                     await Dispatcher.InvokeAsync(NotifyCache, DispatcherPriority.Background);
                 }
                 else
@@ -1785,6 +1828,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         GpuResampler.Enabled = !GpuResampler.Enabled;
         RefreshGpu();
 
+        // 这里是从用户操作进来的，可以等初始化（GpuActive 会触发 Ensure）
         Status = GpuResampler.GpuActive
             ? $"GPU 加速已开启 · {GpuAccel.DeviceName}"
             : GpuAccel.Available
@@ -1798,15 +1842,30 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// 性能自测（命令行 --bench）：连续翻页若干张，各段耗时写入 perf.log 后自动退出。
     /// 走的是和键盘翻页完全相同的 Go() 路径，所以测到的就是真实体感链路。
     /// </summary>
-    public async Task BenchAsync(int steps, int intervalMs)
+    public async Task BenchAsync(int steps, int intervalMs, int rounds = 2)
     {
         await Task.Delay(6000); // 等启动、预载铺开
-        Perf.Note($"==== bench 开始：{steps} 张 / 间隔 {intervalMs} ms ====");
 
-        for (int i = 0; i < steps; i++)
+        for (int r = 1; r <= rounds; r++)
         {
-            await Dispatcher.InvokeAsync(() => Go(1));
-            await Task.Delay(intervalMs);
+            Perf.Note($"==== bench 第 {r} 轮 去程：前进 {steps} 张 / 间隔 {intervalMs} ms ====");
+
+            for (int i = 0; i < steps; i++)
+            {
+                await Dispatcher.InvokeAsync(() => Go(1));
+                await Task.Delay(intervalMs);
+            }
+
+            await Task.Delay(1500);
+            Perf.Note($"==== bench 第 {r} 轮 返程：原路后退 {steps} 张（同一批图第二/三次经过）====");
+
+            for (int i = 0; i < steps; i++)
+            {
+                await Dispatcher.InvokeAsync(() => Go(-1));
+                await Task.Delay(intervalMs);
+            }
+
+            await Task.Delay(1500);
         }
 
         await Task.Delay(5000); // 等最后一次全清 / 精修落定

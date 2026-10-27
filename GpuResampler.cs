@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 
@@ -17,13 +18,20 @@ public static class GpuResampler
     /// <summary>总开关：默认开。关掉后全部走 CPU/WIC 路径，便于对比效果。</summary>
     public static bool Enabled { get; set; } = true;
 
+    /// <summary>GPU 是否可用（会触发 CUDA 初始化，只在工作线程调用）。</summary>
     public static bool GpuActive => Enabled && GpuAccel.Available;
 
-    /// <summary>状态栏用的一行说明。</summary>
-    public static string StatusText =>
+    /// <summary>
+    /// 同 GpuActive，但**不触发初始化**：CUDA 初始化要 1~2 秒，UI 线程读取会整段卡住。
+    /// 界面展示一律用这个，初始化交给后台，完成后再刷新。
+    /// </summary>
+    public static bool GpuReady => Enabled && GpuAccel.IsReady;
+
+    /// <summary>状态栏用的一行说明（不触发初始化；初始化中显示「正在检测」）。</summary>
+    public static string StatusTextReady =>
         !Enabled ? "GPU 已关闭（CPU 渲染）"
-        : GpuAccel.Available ? $"CUDA · {GpuAccel.DeviceName}"
-        : $"CPU 渲染（{GpuAccel.FailReason}）";
+        : GpuAccel.IsReady ? $"CUDA · {GpuAccel.DeviceNameOrEmpty}"
+        : "CPU 渲染（正在检测 GPU…）";
 
     // ==================================================================
     // 像素进出
@@ -130,6 +138,138 @@ public static class GpuResampler
         }
 
         return WicResize(src, ow, oh);
+    }
+
+    // ==================================================================
+    // 显存常驻 + 结果缓存
+    //
+    // 切图时「尽量不要再计算」的两层保障：
+    //   ① 源图常驻显存（GpuImageCache）：省掉每次的 CopyPixels + H2D 上传
+    //   ② 结果缓存：同一张图 + 同一目标尺寸，直接把上次算好的位图拿出来，
+    //      kernel 都不跑——来回翻页 / 缩放回原位时是真正的零计算
+    // ==================================================================
+
+    private const int ResultCapacity = 12;   // 12 张 × 约 4MB ≈ 48MB 主机内存
+
+    /// <summary>结果缓存开关（--novram 时一起关掉，便于 A/B 对比）。</summary>
+    public static bool ResultCacheEnabled { get; set; } = true;
+
+    /// <summary>上一次重采样走的哪条路（"结果缓存" / "显存命中" / "上传后算" / "CPU/WIC"），诊断用。</summary>
+    public static string LastFrom { get; private set; } = "";
+
+    private static readonly object ResultGate = new();
+
+    private static readonly LinkedList<KeyValuePair<string, BitmapSource>> ResultLru = new();
+
+    private static readonly Dictionary<string, LinkedListNode<KeyValuePair<string, BitmapSource>>> ResultMap = new();
+
+    /// <summary>
+    /// 走缓存的重采样：结果命中 → 显存命中 → 上传后命中 → 常规路径。
+    /// 尺寸恰好一致时直接返回原位图。
+    /// </summary>
+    public static BitmapSource? ResizeCached(string path, BitmapSource src, int ow, int oh, int edge)
+    {
+        if (ow <= 0 || oh <= 0)
+        {
+            return null;
+        }
+
+        if (src.PixelWidth == ow && src.PixelHeight == oh)
+        {
+            return src;
+        }
+
+        string key = $"{path}|{src.PixelWidth}x{src.PixelHeight}|{ow}x{oh}";
+        LastFrom = "";
+
+        if (ResultCacheEnabled)
+        {
+            lock (ResultGate)
+            {
+                if (ResultMap.TryGetValue(key, out LinkedListNode<KeyValuePair<string, BitmapSource>>? node))
+                {
+                    ResultLru.Remove(node);
+                    ResultLru.AddLast(node);
+                    LastFrom = "结果缓存";   // ② 零计算
+                    return node.Value.Value;
+                }
+            }
+        }
+
+        BitmapSource? made = null;
+
+        if (GpuActive)
+        {
+            if (GpuImageCache.Instance.TryGet(path, edge, out IntPtr dev, out int iw, out int ih))
+            {
+                made = FromDevice(dev, iw, ih, ow, oh);   // ① 源已在显存
+                LastFrom = made is not null ? "显存命中" : "显存命中但失败";
+            }
+            else if (GpuImageCache.Instance.Put(path, src, edge) &&
+                     GpuImageCache.Instance.TryGet(path, edge, out IntPtr d2, out int iw2, out int ih2))
+            {
+                made = FromDevice(d2, iw2, ih2, ow, oh);  // 首次：传进显存后照常算
+                LastFrom = made is not null ? "上传后算" : "上传后失败";
+            }
+            else
+            {
+                byte[]? inBuf = Pixels(src);
+                if (inBuf is not null)
+                {
+                    byte[] outBuf = new byte[ow * oh * 4];
+                    if (GpuAccel.Resize(inBuf, src.PixelWidth, src.PixelHeight, outBuf, ow, oh, true))
+                    {
+                        made = FromBgra(outBuf, ow, oh);
+                    }
+                }
+
+                LastFrom = made is not null ? "常规上传" : "上传失败";
+            }
+        }
+
+        made ??= WicResize(src, ow, oh);
+
+        if (LastFrom.Length == 0)
+        {
+            LastFrom = made is not null ? "CPU/WIC" : "失败";
+        }
+
+        if (made is not null && ResultCacheEnabled)
+        {
+            lock (ResultGate)
+            {
+                LinkedListNode<KeyValuePair<string, BitmapSource>> node =
+                    ResultLru.AddLast(new KeyValuePair<string, BitmapSource>(key, made));
+                ResultMap[key] = node;
+
+                while (ResultLru.Count > ResultCapacity)
+                {
+                    LinkedListNode<KeyValuePair<string, BitmapSource>> oldest = ResultLru.First!;
+                    ResultLru.RemoveFirst();
+                    ResultMap.Remove(oldest.Value.Key);
+                }
+            }
+        }
+
+        return made;
+    }
+
+    private static BitmapSource? FromDevice(IntPtr dev, int iw, int ih, int ow, int oh)
+    {
+        byte[] outBuf = new byte[ow * oh * 4];
+        return GpuAccel.ResizeDevice(dev, iw, ih, outBuf, ow, oh, true)
+            ? FromBgra(outBuf, ow, oh)
+            : null;
+    }
+
+    /// <summary>换图库 / 清空缓存时把结果缓存一起清掉，避免旧图白占内存。</summary>
+    public static void ClearResults()
+    {
+        lock (ResultGate)
+        {
+            ResultLru.Clear();
+            ResultMap.Clear();
+        }
     }
 
     private static BitmapSource? WicResize(BitmapSource src, int ow, int oh)

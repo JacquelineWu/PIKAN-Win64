@@ -85,6 +85,7 @@ public static class GpuAccel
 
     private static string _device = "";
     private static string _failReason = "";
+    private static ulong _totalMem;
 
     /// <summary>CUDA 是否可用（首次访问时完成初始化）。</summary>
     public static bool Available
@@ -101,6 +102,22 @@ public static class GpuAccel
     public static string FailReason
     {
         get { Ensure(); return _failReason; }
+    }
+
+    /// <summary>
+    /// 是否已就绪。**不触发初始化** —— CUDA 初始化要 1~2 秒，UI 线程上调用
+    /// Available 会被它整个卡住（实测启动冻结 2 秒）。状态栏之类的只读展示用这个，
+    /// 初始化由后台的 InitGpuAsync 负责，完成后再刷新一次界面。
+    /// </summary>
+    public static bool IsReady => _ok;
+
+    /// <summary>设备名（未就绪时是空串），同样不触发初始化。</summary>
+    public static string DeviceNameOrEmpty => _device;
+
+    /// <summary>显卡总显存（字节）。显存缓存按它推算自己的配额。</summary>
+    public static ulong TotalMemBytes
+    {
+        get { Ensure(); return _totalMem; }
     }
 
     /// <summary>"CUDA" 或 "CPU"。</summary>
@@ -179,6 +196,7 @@ public static class GpuAccel
         Marshal.FreeHGlobal(nm);
 
         CudaNative.cuDeviceTotalMem_v2(out ulong total, dev);
+        _totalMem = total;
         CudaNative.cuDeviceGetAttribute(out int ccMaj, 75, dev);
         CudaNative.cuDeviceGetAttribute(out int ccMin, 76, dev);
         CudaNative.cuDeviceGetAttribute(out int sms, 16, dev);
@@ -372,7 +390,7 @@ public static class GpuAccel
     /// </summary>
     public static bool Resize(byte[] src, int iw, int ih, byte[] dst, int ow, int oh, bool highQuality = true)
     {
-        bool ok = ResizeCore(src, iw, ih, dst, ow, oh, highQuality);
+        bool ok = ResizeCore(src, IntPtr.Zero, iw, ih, dst, ow, oh, highQuality);
         if (ok)
         {
             _okCount++;
@@ -389,7 +407,140 @@ public static class GpuAccel
         return ok;
     }
 
-    private static bool ResizeCore(byte[] src, int iw, int ih, byte[] dst, int ow, int oh, bool highQuality)
+    // ==================================================================
+    // 显存常驻：分配 / 上传 / 释放 / 直接拿显存里的图做重采样
+    //
+    // 目的：预载阶段把解码好的 BGRA 一次性传进显存并常驻，之后每次切图
+    // 都直接从这块显存起算，省掉「CopyPixels（CPU 拷几 MB）+ H2D 上传」这两步；
+    // 再叠一层结果缓存，来回翻同一张时连 kernel 都不用跑。
+    // ==================================================================
+
+    private static int _devHit;
+    private static int _devPut;
+
+    /// <summary>在设备上分配 bytes 字节。</summary>
+    public static bool DevAlloc(ulong bytes, out IntPtr ptr)
+    {
+        ptr = IntPtr.Zero;
+        if (bytes == 0)
+        {
+            return false;
+        }
+
+        lock (Gate)
+        {
+            if (!Prepare())
+            {
+                return false;
+            }
+
+            try
+            {
+                if (CudaNative.cuMemAlloc(out IntPtr p, bytes) != 0)
+                {
+                    return false;
+                }
+
+                ptr = p;
+                return true;
+            }
+            finally
+            {
+                Done();
+            }
+        }
+    }
+
+    /// <summary>把主机侧的 BGRA 像素上传到已分配的设备缓冲。</summary>
+    public static bool DevUpload(IntPtr ptr, byte[] src, int bytes)
+    {
+        if (ptr == IntPtr.Zero || bytes <= 0 || bytes > src.Length)
+        {
+            return false;
+        }
+
+        lock (Gate)
+        {
+            if (!Prepare())
+            {
+                return false;
+            }
+
+            try
+            {
+                GCHandle h = GCHandle.Alloc(src, GCHandleType.Pinned);
+                try
+                {
+                    return CudaNative.cuMemcpyHtoD(ptr, h.AddrOfPinnedObject(), (ulong)bytes) == 0;
+                }
+                finally
+                {
+                    h.Free();
+                }
+            }
+            finally
+            {
+                Done();
+            }
+        }
+    }
+
+    public static void DevFree(IntPtr ptr)
+    {
+        if (ptr == IntPtr.Zero)
+        {
+            return;
+        }
+
+        lock (Gate)
+        {
+            if (!Prepare())
+            {
+                return;
+            }
+
+            try
+            {
+                CudaNative.cuMemFree(ptr);
+            }
+            finally
+            {
+                Done();
+            }
+        }
+    }
+
+    /// <summary>源图已在显存里：跳过上传，直接重采样回主机内存。</summary>
+    public static bool ResizeDevice(IntPtr devSrc, int iw, int ih, byte[] dst, int ow, int oh, bool highQuality = true)
+    {
+        bool ok = ResizeCore(null, devSrc, iw, ih, dst, ow, oh, highQuality);
+        if (ok)
+        {
+            _devHit++;
+            if (_devHit <= 3 || _devHit % 100 == 0)
+            {
+                Log($"vram hit #{_devHit}  {iw}x{ih} -> {ow}x{oh}（源在显存，未上传）");
+            }
+        }
+        else
+        {
+            NoteFailure($"vram resize {iw}x{ih} -> {ow}x{oh}");
+        }
+
+        return ok;
+    }
+
+    /// <summary>记一次「上传入显存」；用于确认预载确实把图放进去了（限流）。</summary>
+    public static void NoteUpload(int w, int h, long bytes)
+    {
+        _devPut++;
+        if (_devPut <= 3 || _devPut % 50 == 0)
+        {
+            Log($"vram put  #{_devPut}  {w}x{h} · {bytes / (1024 * 1024)} MB");
+        }
+    }
+
+    private static bool ResizeCore(byte[]? src, IntPtr devSrc, int iw, int ih, byte[] dst, int ow, int oh, bool highQuality)
     {
         if (iw <= 0 || ih <= 0 || ow <= 0 || oh <= 0) return false;
 
@@ -398,18 +549,34 @@ public static class GpuAccel
             if (!Prepare()) return false;
             try
             {
-                ulong nin = (ulong)src.LongLength;
                 ulong nout = (ulong)dst.LongLength;
-                if (!EnsureBuf(ref _bufA, ref _capA, nin)) return false;
+                IntPtr inPtr = devSrc;
+
+                if (inPtr == IntPtr.Zero)
+                {
+                    // 源在主机内存：走原来的「上传 → 算 → 回传」
+                    if (src is null) return false;
+                    ulong nin = (ulong)src.LongLength;
+                    if (!EnsureBuf(ref _bufA, ref _capA, nin)) return false;
+                    inPtr = _bufA;
+
+                    GCHandle hi = GCHandle.Alloc(src, GCHandleType.Pinned);
+                    try
+                    {
+                        if (CudaNative.cuMemcpyHtoD(_bufA, hi.AddrOfPinnedObject(), nin) != 0) return false;
+                    }
+                    finally
+                    {
+                        hi.Free();
+                    }
+                }
+
                 if (!EnsureBuf(ref _bufB, ref _capB, nout)) return false;
 
-                GCHandle hi = GCHandle.Alloc(src, GCHandleType.Pinned);
                 GCHandle ho = GCHandle.Alloc(dst, GCHandleType.Pinned);
                 try
                 {
-                    if (CudaNative.cuMemcpyHtoD(_bufA, hi.AddrOfPinnedObject(), nin) != 0) return false;
-
-                    SetSlot(0, (ulong)_bufA);
+                    SetSlot(0, (ulong)inPtr);
                     SetSlot(1, (ulong)_bufB);
                     SetSlot(2, (uint)iw);
                     SetSlot(3, (uint)ih);
@@ -426,7 +593,6 @@ public static class GpuAccel
                 }
                 finally
                 {
-                    hi.Free();
                     ho.Free();
                 }
             }
