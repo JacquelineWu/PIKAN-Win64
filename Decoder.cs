@@ -11,6 +11,12 @@ public sealed class DecodedImage
     /// <summary>已 Freeze 的位图，可跨线程交给 UI 显示。</summary>
     public required BitmapSource Source { get; init; }
 
+    /// <summary>
+    /// 解码时长边上限（即这张图的清晰度档位）。
+    /// 用来判断缓存里的图够不够直接上主视图——不够就再后台解一张更高清的覆盖。
+    /// </summary>
+    public int Edge { get; init; }
+
     /// <summary>原图宽（用于 1:1 与信息栏，不是位图宽）。</summary>
     public required int Width { get; init; }
 
@@ -131,6 +137,7 @@ public static class Decoder
                 Source = bi,
                 Width = w,
                 Height = h,
+                Edge = edge,
                 Bytes = (long)bi.PixelWidth * bi.PixelHeight * 4
             };
         }

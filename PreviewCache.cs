@@ -4,22 +4,31 @@ using System.Windows.Media.Imaging;
 namespace PIKAN;
 
 /// <summary>
-/// 后台预载缓存（低清预览），与鸿蒙版 previews 数组对应。
+/// 后台预载缓存，与鸿蒙版 previews 数组对应。
 ///
-/// 思路（和 ACDSee 的「先出缩略预览再 sharpen」一致）：
-///   · 后台把当前位置前后各 20 张解成低清预览并缓存；
-///   · 切到某张时缓存命中就立刻把预览画上去做「大模糊 → 对焦」，清晰图到了再覆盖；
-///   · 窗口跟着当前位置滑动（EvictOutside）：翻到哪缓存哪附近，远处立刻释放，
-///     于是翻一整个大图库内存也不随翻页累积。
+/// 目的是「翻页不等解码」：后台把当前位置前后各 20 张**按可显示清晰度**解码并缓存，
+/// 切图时命中就直接上主视图，不用再解码（这是载入快的关键）。
+/// 缓存的清晰度档位 Edge 由主窗口按画布尺寸动态决定（见 MainWindow.PreloadTargetEdge）。
+///
+///   命中缓存   → 立即显示该图；档位不够清晰时再后台解一张更高清的覆盖（渐进式）
+///   未命中     → 先解一张 768 低清占位，再后台解高清覆盖
+///
+/// 窗口跟着当前位置滑动（EvictOutside）：翻到哪缓存哪附近，远处立刻释放，
+/// 于是翻一整个大图库内存也不随翻页累积。
 ///
 /// 上限是「张数」与「总字节」双重保险：
 ///   容量必须大于窗口大小，否则每入一张就淘汰一张、又被预载链加回来，来回抖动。
 /// </summary>
 public sealed class PreviewCache
 {
-    public const int PreloadEdge = 768;    // 预载长边：768px 时单张约 1.7MB，41 张 ≈ 70MB
+    public const int QuickEdge = 768;      // 未命中缓存时的低清占位档位（单张约 1.7MB）
+    public const int MinEdge = 1024;       // 预载档位下限
+    public const int MaxEdge = 1280;       // 预载档位上限：再大 41 张就吃掉几百 MB 内存
     public const int Capacity = 48;        // 窗口 41 张，留 7 张余量
-    public const long MaxBytes = 96L * 1024 * 1024;
+    public const long MaxBytes = 320L * 1024 * 1024;
+
+    /// <summary>当前预载档位（长边像素）。画布尺寸变化时由主窗口更新。</summary>
+    public int Edge { get; set; } = 1280;
 
     private readonly List<DecodedImage> _items = new();
     private long _bytes;
@@ -110,10 +119,21 @@ public sealed class PreviewCache
         }
     }
 
-    public void Clear()
+    /// <summary>清空缓存；正在显示的图可以保留（否则画面会变黑）。</summary>
+    public void Clear(params ImageSource?[] protectedSources)
     {
+        List<DecodedImage> keep = _items
+            .Where(e => protectedSources.Any(s => s is not null && ReferenceEquals(s, e.Source)))
+            .ToList();
+
         _items.Clear();
         _bytes = 0;
+
+        foreach (DecodedImage k in keep)
+        {
+            _items.Add(k);
+            _bytes += k.Bytes;
+        }
     }
 
     public int Count => _items.Count;

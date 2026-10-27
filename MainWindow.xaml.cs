@@ -50,21 +50,23 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>按下到抬起若移动超过该距离（px）就判定为拖拽平移，不触发点击缩放。</summary>
     private const double ClickMoveTol = 4;
 
-    // ---- 后台预载窗口 ----
+    // ---- 后台预载窗口：前后各 20 张，解码成「可显示清晰度」缓存起来 ----
     private const int PreloadFwd = 20;
     private const int PreloadBack = 20;
+
+    /// <summary>
+    /// 预载命中后，停手多久再补一张全清（画布长边 ×2）。
+    /// 连续翻页时这一步会被下一切图作废，所以延迟执行能省掉大量无用解码。
+    /// </summary>
+    private const int UpgradeDelayMs = 250;
 
     /// <summary>主视图解码的长边下限 / 上限（按「画布长边 × 2」取，放大到 200% 仍清晰）。</summary>
     private const int ViewEdgeMin = 1600;
     private const int ViewEdgeMax = 4096;
 
-    // ---- 切图过渡：低清 + 大模糊 → 分档对焦 → 清晰图就绪后整层淡出 ----
-    private const double BlurMax = 14;
-    private const double BlurZoom = 0.02;
-    private const int BlurSteps = 4;
-    private const int BlurStepMs = 22;
-    private const int BlurFadeSteps = 4;
-    private const int BlurFadeStepMs = 22;
+    // ---- 切图过渡：低清图立刻顶上 → 清晰图就绪后直接替换。
+    // 早期版本这里有「大模糊 → 分档对焦 → 淡出」的动画，已按需求移除：
+    // 现在切图是瞬时替换，不做任何模糊/缩放/淡入淡出。
 
     // ---- 滚轮去抖 / 合并 ----
     private const long WheelNotchMs = 60;
@@ -83,7 +85,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private readonly ScaleTransform _mainScale = new(1, 1);
     private readonly ScaleTransform _lowScale = new(1, 1);
-    private readonly BlurEffect _lowBlur = new() { Radius = 0, KernelType = KernelType.Gaussian };
 
     private readonly DispatcherTimer _slideTimer = new();
     private readonly DispatcherTimer _posTimer = new() { Interval = TimeSpan.FromMilliseconds(PosSaveMs) };
@@ -128,22 +129,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     // ---- 主视图 / 过渡层 ----
     private long _curToken;
-    private long _focusSeq;
     private DecodedImage? _viewOwned;
     private DecodedImage? _warm;
-    private double _blurRadius;
-    private double _lowOpacity;
-
-    /// <summary>过渡层的「未模糊」原图：GPU 模糊要始终从它取样，否则会二次模糊。</summary>
-    private BitmapSource? _lowSource;
 
     // ---- GPU 加速 ----
     private long _refineSeq;
-    private readonly Dictionary<(BitmapSource Src, int Key), BitmapSource> _blurCache = new();
 
     // ---- 预载链 ----
     private long _preloadSeq;
     private bool _preloadBusy;
+    private long _preloadLoggedAt;
 
     // ---- 体积补测 ----
     private long _sizeSeq;
@@ -173,7 +168,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         MainImage.RenderTransform = _mainScale;
         LowImage.RenderTransform = _lowScale;
-        LowImage.Effect = _lowBlur;
 
         _slideTimer.Interval = TimeSpan.FromMilliseconds(SlideIntervalMs);
         _slideTimer.Tick += (_, _) => Go(1);
@@ -237,6 +231,31 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     public string GpuLine => "x64 · Windows · " + GpuResampler.StatusText;
 
+    /// <summary>状态栏：已预载并缓存的图片张数与占用。</summary>
+    public string CacheLabel =>
+        _previews.Count > 0
+            ? $"预载 {_previews.Count} 张 · {ImageItem.FormatBytes(_previews.Bytes)}"
+            : "预载中";
+
+    /// <summary>
+    /// 预载张数变化后刷新状态栏（预载链在后台线程，故走 Dispatcher）。
+    /// 只在文本真的变了才通知：状态栏文本变化会触发布局，布局又可能带动画布尺寸变化，
+    /// 不做这层去抖会和 SizeChanged 形成互相刺激的死循环。
+    /// </summary>
+    private void NotifyCache()
+    {
+        string text = CacheLabel;
+        if (text == _cacheLabelShown)
+        {
+            return;
+        }
+
+        _cacheLabelShown = text;
+        OnPropertyChanged(nameof(CacheLabel));
+    }
+
+    private string _cacheLabelShown = "";
+
     public string GpuTip => GpuResampler.GpuActive
         ? $"GPU 加速已开启\n{GpuAccel.DeviceName}\n点击切到 CPU 渲染（Ctrl+G）"
         : $"当前为 CPU 渲染{(GpuAccel.Available ? "（已手动关闭 GPU）" : "\n" + GpuAccel.FailReason)}\n点击开启 CUDA 加速（Ctrl+G）";
@@ -280,14 +299,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         ResumeHint = $"上次看到「{p.LastName}」（第 {p.LastIdx + 1} 张 · {p.LastSrc}）";
 
-        // 预热「上次成功显示的那张」：后台只解 1 张低清图，用户打开图库时首屏直接命中缓存
+        // 预热「上次成功显示的那张」：按预载档位后台解 1 张，用户打开图库时首屏直接命中缓存
         if (p.LastOkUri.Length > 0 && File.Exists(p.LastOkUri))
         {
             string uri = p.LastOkUri;
+            int warmEdge = _previews.Edge;
             _ = Task.Run(async () =>
             {
                 await Task.Delay(300);
-                DecodedImage? img = Decoder.Decode(uri, PreviewCache.PreloadEdge);
+                DecodedImage? img = Decoder.Decode(uri, warmEdge);
                 if (img is null)
                 {
                     return;
@@ -575,18 +595,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _mainScale.ScaleX = _zoom * (_flipH ? -1 : 1);
         _mainScale.ScaleY = _zoom * (_flipV ? -1 : 1);
 
-        double fz = FocusZoom();
-        _lowScale.ScaleX = _mainScale.ScaleX * fz;
-        _lowScale.ScaleY = _mainScale.ScaleY * fz;
+        // 低清占位层与主层用同样的变换（早期版本这里有过对焦呼吸缩放，已移除）
+        _lowScale.ScaleX = _mainScale.ScaleX;
+        _lowScale.ScaleY = _mainScale.ScaleY;
 
         Matrix m = new();
         m.Translate(_tx, _ty);
         m.RotateAt(_rot, cw / 2, ch / 2);
         Viewport.RenderTransform = new MatrixTransform(m);
     }
-
-    /// <summary>过渡层的附加缩放：模糊越大越「推近」（最多 +2%），对焦完成恰好回到 1.0。</summary>
-    private double FocusZoom() => 1 + BlurZoom * (_blurRadius / BlurMax);
 
     private void ResetView()
     {
@@ -755,9 +772,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     /// <summary>
     /// 切到第 idx 张：
-    ///   ① 代号 +1，作废一切在途的异步回调（含过渡动画）；
-    ///   ② 命中预载缓存就把那张低清图盖到过渡层做「大模糊」，再分档收敛（对焦感）；
-    ///   ③ 同时异步解码「画布长边 ×2」的清晰图，校验代号后放回底层，并让过渡层淡出。
+    ///   ① 代号 +1，作废一切在途的异步回调；
+    ///   ② 命中预载缓存 → 那张图已经是「可显示清晰度」，直接上主视图，不等解码；
+    ///   ③ 未命中 → 先解一张 768 低清占位（避免空白），再解高清覆盖；
+    ///   ④ 缓存档位不够清晰时，停手 UpgradeDelayMs 之后再补一张全清的（渐进式升级）。
     /// </summary>
     private void ShowPreviewOf(int idx)
     {
@@ -778,23 +796,44 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         string path = _items[idx].Path;
         DecodedImage? hit = _previews.Get(path);
+
         if (hit is not null)
         {
-            StartFocus(hit);
+            ShowDecoded(hit); // 预载命中：立刻出图，这是「翻页不等解码」的关键
+
+            if (hit.Edge < ViewEdge() * 0.85)
+            {
+                _ = LoadViewAsync(path, token, UpgradeDelayMs); // 停下来再升到全清
+            }
+            else
+            {
+                ScheduleRefine();
+            }
         }
         else
         {
             ClearBlur();
-            _ = LoadQuickAsync(path, token);
+            _ = LoadQuickAsync(path, token);   // 低清占位
+            _ = LoadViewAsync(path, token, 0); // 尽快拿到全清
         }
-
-        _ = LoadViewAsync(path, token);
     }
 
-    /// <summary>低清占位：与主视图解码并行，谁先回来谁先顶上。</summary>
+    /// <summary>把一张已解码的图放上主视图（预载命中 / 高清到达都走这里）。</summary>
+    private void ShowDecoded(DecodedImage img)
+    {
+        NoteShown(img.Path);
+        _viewOwned = img;
+        MainImage.Source = img.Source;
+        _imgW = img.Width;
+        _imgH = img.Height;
+        UpdateTransform();
+        RefreshImageInfo();
+    }
+
+    /// <summary>低清占位：仅在预载未命中时用，与主视图解码并行。</summary>
     private async Task LoadQuickAsync(string path, long token)
     {
-        DecodedImage? q = await Task.Run(() => Decoder.Decode(path, PreviewCache.PreloadEdge));
+        DecodedImage? q = await Task.Run(() => Decoder.Decode(path, PreviewCache.QuickEdge));
         if (token != _curToken)
         {
             return; // 解码期间又切了图 → 丢弃
@@ -805,7 +844,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        if (_viewOwned is null)
+        if (MainImage.Source is null)
         {
             StartFocus(q);
         }
@@ -813,8 +852,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _previews.Add(q, MainImage.Source, LowImage.Source);
     }
 
-    private async Task LoadViewAsync(string path, long token)
+    /// <summary>
+    /// 解出「画布长边 ×2」的全清图并覆盖主视图。
+    /// delayMs &gt; 0 时先等一会儿：连续翻页途中就不浪费 CPU 去解高清了，
+    /// 停手之后才把当前这张升到全清。
+    /// </summary>
+    private async Task LoadViewAsync(string path, long token, int delayMs = 0)
     {
+        if (delayMs > 0)
+        {
+            await Task.Delay(delayMs);
+            if (token != _curToken)
+            {
+                return;
+            }
+        }
+
         int edge = ViewEdge();
         DecodedImage? ret = await Task.Run(() => Decoder.Decode(path, edge));
 
@@ -830,14 +883,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        NoteShown(path);
-        _viewOwned = ret;
-        MainImage.Source = ret.Source;
-        _imgW = ret.Width;
-        _imgH = ret.Height;
-        UpdateTransform();
-        RefreshImageInfo();
-        FinishFocus();
+        ShowDecoded(ret);
+        ClearBlur();
 
         // 清晰图就位后，再让 GPU 按屏幕实际像素精修一次（缩放停止后也会重做）
         _ = RefineViewAsync(ret, token);
@@ -963,18 +1010,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _posTimer.Start();
     }
 
-    // ---- 过渡动画 ----
+    // ---- 低清占位层 ----
+    // 切图时把已缓存的低清图立刻顶上（避免空白），清晰图解码完成后直接替换。
+    // 不做模糊、不做缩放呼吸、不做淡入淡出——纯瞬时切换。
 
     private void StartFocus(DecodedImage img)
     {
-        _focusSeq++;
-        long seq = _focusSeq;
         NoteShown(img.Path);
 
-        _lowSource = img.Source;
         LowImage.Source = img.Source;
-        _blurRadius = BlurMax;
-        _lowOpacity = 1;
+        LowImage.Opacity = 1;
+        LowImage.Effect = null;
         if (_imgW <= 0)
         {
             _imgW = img.Width; // 先让用户看到尺寸，清晰图到了再校正
@@ -982,127 +1028,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             RefreshImageInfo();
         }
 
-        UpdateLowLayer();
-        _ = RunFocusAsync(seq);
+        UpdateTransform();
     }
 
-    private async Task RunFocusAsync(long seq)
-    {
-        for (int step = BlurSteps - 1; step >= 1; step--)
-        {
-            await Task.Delay(BlurStepMs);
-            if (seq != _focusSeq)
-            {
-                return; // 又切了图：这次对焦作废
-            }
-
-            _blurRadius = BlurMax * step / BlurSteps;
-            UpdateLowLayer();
-        }
-    }
-
-    private void FinishFocus()
-    {
-        if (LowImage.Source is null)
-        {
-            return;
-        }
-
-        _focusSeq++; // 停掉还在跑的分档对焦，改由淡出链收尾
-        _ = RunFadeAsync(_focusSeq, _blurRadius);
-    }
-
-    private async Task RunFadeAsync(long seq, double startBlur)
-    {
-        for (int i = BlurFadeSteps - 1; i >= 1; i--)
-        {
-            await Task.Delay(BlurFadeStepMs);
-            if (seq != _focusSeq)
-            {
-                return;
-            }
-
-            double k = (double)i / BlurFadeSteps;
-            _lowOpacity = k;
-            _blurRadius = startBlur * k;
-            UpdateLowLayer();
-        }
-
-        ClearBlur();
-    }
-
-    private void UpdateLowLayer()
-    {
-        LowImage.Opacity = _lowOpacity;
-
-        // GPU 可用时改用 CUDA 高斯模糊；否则沿用 WPF 的 BlurEffect（它本身也是 GPU shader）
-        if (GpuResampler.GpuActive && _lowSource is not null && _blurRadius > 0.01)
-        {
-            // 低清图会被放大到画布尺寸显示，模糊半径要按同一个比例折算，
-            // 否则「低清图上 14px 的模糊」在屏幕上会显得比 BlurEffect 的 14 更大。
-            double scale = _lowSource.PixelWidth > 0 && FrameW > 0
-                ? FrameW / _lowSource.PixelWidth
-                : 1;
-            double sigma = _blurRadius * Math.Clamp(scale, 0.25, 4.0);
-
-            BitmapSource? blurred = CachedBlur(_lowSource, sigma);
-            if (blurred is not null)
-            {
-                LowImage.Effect = null;
-                LowImage.Source = blurred;
-            }
-            else
-            {
-                _lowBlur.Radius = _blurRadius;
-                LowImage.Effect = _lowBlur;
-            }
-        }
-        else
-        {
-            _lowBlur.Radius = _blurRadius;
-            LowImage.Effect = _lowBlur;
-        }
-
-        UpdateTransform(); // focusZoom 变了，缩放要跟着同步
-    }
-
-    /// <summary>
-    /// 模糊结果缓存：一次对焦动画只有 4 档半径，缓存后只在首帧真正调 GPU。
-    /// 半径按 0.5 粒度量化，避免每帧都算新权重。
-    /// </summary>
-    private BitmapSource? CachedBlur(BitmapSource src, double sigma)
-    {
-        int key = Math.Clamp((int)Math.Round(sigma * 2), 1, 512);
-        if (_blurCache.TryGetValue((src, key), out BitmapSource? hit))
-        {
-            return hit;
-        }
-
-        BitmapSource? made = GpuResampler.Blur(src, key / 2.0);
-        if (made is null)
-        {
-            return null;
-        }
-
-        if (_blurCache.Count > 48)
-        {
-            _blurCache.Clear();
-        }
-
-        _blurCache[(src, key)] = made;
-        return made;
-    }
+    /// <summary>清晰图已就位（或解码失败）：撤掉低清占位层。</summary>
+    private void FinishFocus() => ClearBlur();
 
     private void ClearBlur()
     {
-        _focusSeq++;
-        _lowSource = null;
         LowImage.Source = null;
         LowImage.Opacity = 0;
-        _lowBlur.Radius = 0;
-        _blurRadius = 0;
-        _lowOpacity = 0;
-        _blurCache.Clear();
+        LowImage.Effect = null;
     }
 
     // ==================================================================
@@ -1111,7 +1047,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void SchedulePreload()
     {
+        // 画布尺寸变了 → 预载清晰度档位跟着变，旧档位的缓存作废重解
+        int want = PreloadTargetEdge();
+        if (want != _previews.Edge)
+        {
+            _previews.Edge = want;
+            _previews.Clear(MainImage.Source, LowImage.Source);
+        }
+
         _previews.EvictOutside(_items, _cur, PreloadBack, PreloadFwd, MainImage.Source, LowImage.Source);
+        NotifyCache();
         _preloadSeq++;
         if (_preloadBusy)
         {
@@ -1170,11 +1115,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
                 if (target is null)
                 {
+                    // 窗口内全部就绪：记一行便于确认预载真的铺满（限流，功能无关）
+                    long now = Environment.TickCount64;
+                    if (now - _preloadLoggedAt > 5000)
+                    {
+                        _preloadLoggedAt = now;
+                        GpuAccel.WriteLog(
+                            $"preload ready  {_previews.Count} 张 · {_previews.Bytes / (1024 * 1024)} MB · edge={_previews.Edge}");
+                    }
+
                     return; // 窗口内都预载好了
                 }
 
                 string t = target;
-                DecodedImage? entry = await Task.Run(() => Decoder.Decode(t, PreviewCache.PreloadEdge));
+                DecodedImage? entry = await Task.Run(() => Decoder.Decode(t, _previews.Edge));
                 if (mySeq != _preloadSeq)
                 {
                     continue; // 期间又切了图 → 重新挑目标，别把链断掉
@@ -1183,6 +1137,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 if (entry is not null)
                 {
                     _previews.Add(entry, MainImage.Source, LowImage.Source);
+                    await Dispatcher.InvokeAsync(NotifyCache, DispatcherPriority.Background);
                 }
                 else
                 {
@@ -1639,6 +1594,30 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _pendingReload = false;
             ShowPreviewOf(_cur);
         }
+
+        // 只有预载档位真的变了才重排（档位没变时不必动预载链，否则会和布局互相刺激）
+        if (PreloadTargetEdge() != _previews.Edge)
+        {
+            SchedulePreload();
+        }
+    }
+
+    /// <summary>
+    /// 预载清晰度档位：取「画布长边 ×1.15」，夹在 1024–1600 之间，再量化到 256 的倍数。
+    /// 量化是为了窗口每变几像素不至于整批重解码。
+    /// 上限 1600 是内存约束：41 张 × 约 6.8MB ≈ 280MB，再大就吃不消了；
+    /// 真正「正在看」的那张仍会单独解到全清（画布长边 ×2）。
+    /// </summary>
+    private int PreloadTargetEdge()
+    {
+        double edge = Math.Max(CanvasArea.ActualWidth, CanvasArea.ActualHeight);
+        if (edge <= 0)
+        {
+            return PreviewCache.MinEdge;
+        }
+
+        int v = (int)Math.Clamp(edge * 1.15, PreviewCache.MinEdge, PreviewCache.MaxEdge);
+        return Math.Max(PreviewCache.MinEdge, (int)(Math.Round(v / 256.0) * 256));
     }
 
     // ==================================================================
@@ -1754,7 +1733,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 ? "已切到 CPU 渲染（GPU 仍可用，Ctrl+G 切回）"
                 : $"CPU 渲染 · {GpuAccel.FailReason}";
 
-        _blurCache.Clear();
         ScheduleRefine();
     }
 

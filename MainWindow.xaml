@@ -349,6 +349,7 @@
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <TextBlock Grid.Column="0"
                            Text="{Binding Status}"
@@ -357,6 +358,13 @@
                            VerticalAlignment="Center"
                            TextTrimming="CharacterEllipsis" />
                 <TextBlock Grid.Column="1"
+                           Text="{Binding CacheLabel}"
+                           FontSize="11"
+                           Foreground="#5a6272"
+                           Margin="0,0,16,0"
+                           VerticalAlignment="Center"
+                           ToolTip="后台已预载并缓存的图片：当前位置前后各 20 张，翻页时直接命中，不用等解码" />
+                <TextBlock Grid.Column="2"
                            Text="{Binding GpuLine}"
                            FontSize="11"
                            Foreground="#5a6272"
