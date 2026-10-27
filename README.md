@@ -53,11 +53,31 @@ bin\Release\net10.0-windows\PIKAN.exe
 需要 **.NET 10 SDK**（`net10.0-windows`，含 WPF / WindowsDesktop 运行时）。
 本仓库用 Visual Studio 2026 / `dotnet build` 均可，无第三方包，restore 秒过。
 
-**分发成单文件 exe**（目标机不用装 .NET，约 70MB，需联网拉运行时包）：
+### 独立单文件 exe（可拷到任意 Win64 机器）
+
+仓库根目录的 **`PIKAN.exe`（约 66 MB）** 就是自包含单文件版本：**目标机不用装 .NET，不用装 CUDA Toolkit，
+不依赖任何外部文件**——双击即用，拷到 U 盘也行。
+
+重新生成：
 
 ```bat
-dotnet publish -c Release -r win-x64 -p:SelfContained=true -p:PublishSingleFile=true
+dotnet publish -c Release -r win-x64 --self-contained true ^
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true ^
+  -p:EnableCompressionInSingleFile=true -p:DebugType=none -p:SatelliteResourceLanguages=en
+
+copy bin\Release\net10.0-windows\win-x64\publish\PIKAN.exe PIKAN.exe
 ```
+
+几个已知事项：
+
+- `IncludeNativeLibrariesForSelfExtract` 是必需的：WPF 的 native 组件（`wpfgfx_cor3.dll`、
+  `PresentationNative_cor3.dll`、`D3DCompiler_47_cor3.dll` 等）没法压进单文件 bundle，
+  靠它在运行时自解压，所以发布目录里最终只有一个 exe。
+- 首次启动会比框架依赖版慢一点（压缩 bundle 要解压），之后有缓存。
+- PTX kernel 已**嵌入程序集**（`EmbeddedResource`），单文件下 `Assembly.Location` 为空也能读到；
+  如果想换 kernel 调试，在 exe 旁边放 `Kernels\pikan.ptx` 会优先用外部的。
+- 目标机上 GPU 加速要生效，需要 NVIDIA 驱动（Volta 及以上）；否则自动回落 CPU，功能不受影响。
+- 看 HEIC 需要目标机装微软的 **HEIF Image Extension**（微软商店免费）。
 
 ## GPU 加速（CUDA 优先）
 
@@ -162,3 +182,18 @@ PIKAN-Win64/
 
 - 重采样 1920×1080 → 960×540：**约 3.7 ms**
 - 高斯模糊 1920×1080、r=42：**约 6.6 ms**
+
+### 独立 exe 验证
+
+把 `PIKAN.exe` 单独拷到一个**空目录**（模拟没装 .NET 的机器）后运行 `PIKAN.exe big.png`：
+
+```
+init ok   NVIDIA GeForce RTX 3080 Laptop GPU · 15GB · sm_86 · 48 SM · CUDA 13.4
+blur ok   #1  768x512 sigma=18.0      ← 切图对焦动画
+blur ok   #2  768x512 sigma=13.5
+blur ok   #3  768x512 sigma=9.0
+refine    目标 1232x821  位图 1971x1314  原图 3000x2000
+resize ok #1  1971x1314 -> 1232x821   ← Mitchell 精修
+```
+
+即：单文件自解压正常、嵌入的 PTX 读得到、CUDA 初始化 → 模糊 → 精修全链路走通。

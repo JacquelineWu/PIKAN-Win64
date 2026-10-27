@@ -21,15 +21,24 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- CUDA kernel 源码（PTX）：随输出目录复制，驱动在运行时 JIT 编译 -->
-    <Content Include="Kernels\pikan.ptx" CopyToOutputDirectory="PreserveNewest" />
+    <!--
+      CUDA kernel 源码（PTX）：嵌入到程序集里，驱动在运行时 JIT 编译。
+      用嵌入而不是复制到输出目录，是因为单文件 exe 里读不到附属文件；
+      LoadPtx() 仍会先找 exe 旁边的 Kernels\pikan.ptx，方便直接调试/替换 kernel。
+    -->
+    <EmbeddedResource Include="Kernels\pikan.ptx" LogicalName="PIKAN.Kernels.pikan.ptx" />
   </ItemGroup>
 
   <!--
     日常开发：dotnet build  →  框架依赖的 PIKAN.exe（需本机装 .NET 10 桌面运行时）
-    分发单文件：dotnet publish -c Release -r win-x64 -p:SelfContained=true -p:PublishSingleFile=true
-                →  约 70MB 的独立 exe，目标机无需装 .NET
-    （自包含需要联网拉 Microsoft.WindowsDesktop.App.Runtime.win-x64 运行时包，故不写死在 csproj 里）
+    分发单文件（自包含，目标机无需装 .NET，约 66MB，需联网拉运行时包）：
+
+      dotnet publish -c Release -r win-x64 /p:SelfContained=true
+        /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true
+        /p:EnableCompressionInSingleFile=true /p:DebugType=none /p:SatelliteResourceLanguages=en
+
+    IncludeNativeLibrariesForSelfExtract 让 WPF 的 native 组件也进 exe，发布目录只有一个文件。
+    注意：root namespace 下的 Kernels\pikan.ptx 是嵌入资源，单文件下照样读得到。
   -->
 
 </Project>

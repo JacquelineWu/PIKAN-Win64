@@ -1,4 +1,5 @@
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 
 namespace PIKAN;
@@ -264,6 +265,7 @@ public static class GpuAccel
 
     private static string LoadPtx()
     {
+        // 1) 先找 exe 旁边的文件：单文件发布时通常没有，但调试时可以直接改 kernel 不重编译
         string[] candidates =
         {
             Path.Combine(AppContext.BaseDirectory, "Kernels", "pikan.ptx"),
@@ -283,6 +285,22 @@ public static class GpuAccel
             {
                 // 换下一个候选路径
             }
+        }
+
+        // 2) 回退到嵌入资源：单文件 exe 走这条路（Assembly.Location 为空也照样能读）
+        try
+        {
+            using Stream? s = Assembly.GetExecutingAssembly()
+                .GetManifestResourceStream("PIKAN.Kernels.pikan.ptx");
+            if (s is not null)
+            {
+                using StreamReader r = new(s);
+                return r.ReadToEnd();
+            }
+        }
+        catch
+        {
+            // 落到空串，由调用方统一报错降级
         }
 
         return "";
