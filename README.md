@@ -79,6 +79,41 @@ copy bin\Release\net10.0-windows\win-x64\publish\PIKAN.exe PIKAN.exe
 - 目标机上 GPU 加速要生效，需要 NVIDIA 驱动（Volta 及以上）；否则自动回落 CPU，功能不受影响。
 - 看 HEIC 需要目标机装微软的 **HEIF Image Extension**（微软商店免费）。
 
+### SmartScreen 拦截怎么办
+
+首次运行时 Windows 可能弹「Windows 已保护你的电脑 — Microsoft Defender SmartScreen 阻止了无法识别的应用启动」。
+**这不是病毒告警**：exe 没有数字签名，SmartScreen 查不到发布者信誉，一律拦。三种处理方式：
+
+| 方式 | 适用 | 怎么做 |
+|---|---|---|
+| 临时放行 | 偶尔用一次 | 弹窗上点 **更多信息 → 仍要运行**，之后 Windows 会记住这个文件 |
+| 自签证书（已做） | 自己的多台机器 | 见下，拷 exe 时带上 `PIKAN-CodeSigning.cer` |
+| 购买代码签名证书 | 对外公开发布 | OV 证书约 ¥1000–3000/年；EV 还能立刻建立 SmartScreen 信誉 |
+
+**本仓库的 exe 已签名**：SHA256 + DigiCert RFC3161 时间戳，发布者
+`CN=JacquelineWu (PIKAN)`，有效期至 2031-10-27（有时间戳，证书过期后签名依然有效）。
+
+拷到另一台机器时，把 `PIKAN-CodeSigning.cer` 一起拷过去并执行：
+
+```bat
+certutil -addstore -user Root PIKAN-CodeSigning.cer
+certutil -addstore -user TrustedPublisher PIKAN-CodeSigning.cer
+```
+
+重新编译后要重签：
+
+```bat
+pwsh .\Sign.ps1                :: 签 .\PIKAN.exe
+pwsh .\Sign.ps1 -Force         :: 强制重签
+pwsh .\Sign.ps1 -NewCert       :: 换一张新证书
+```
+
+`Sign.ps1` 会自动找 Windows SDK 的 `signtool`、取/建证书、导入信任链、导出 `.cer`、签名并验证。
+
+> 说明：自签证书只解决「自己机器上的信任」。SmartScreen 的信誉还看微软云端对该签名的统计，
+> 自签证书在陌生机器上**仍可能提示**，点「仍要运行」即可；要彻底消除只能买受信任 CA 签发的证书。
+> 签名只是往文件尾部追加签名块，不改变程序代码——已验证签名后 CUDA 链路照常工作。
+
 ## GPU 加速（CUDA 优先）
 
 PIKAN 自带一层 CUDA 加速：**不装 CUDA Toolkit、不引任何 NuGet 包**，
