@@ -134,6 +134,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private double _blurRadius;
     private double _lowOpacity;
 
+    /// <summary>过渡层的「未模糊」原图：GPU 模糊要始终从它取样，否则会二次模糊。</summary>
+    private BitmapSource? _lowSource;
+
+    // ---- GPU 加速 ----
+    private long _refineSeq;
+    private readonly Dictionary<(BitmapSource Src, int Key), BitmapSource> _blurCache = new();
+
     // ---- 预载链 ----
     private long _preloadSeq;
     private bool _preloadBusy;
@@ -158,6 +165,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         InitializeComponent();
 
         DataContext = this;
+
+        // 先探一次 GPU：CUDA 上下文创建 + PTX JIT 有几十毫秒开销，放在启动时做，
+        // 避免第一次切图才初始化导致卡顿。失败也只是安静降级。
+        GpuAccel.Touch();
+        RefreshGpu();
+
         MainImage.RenderTransform = _mainScale;
         LowImage.RenderTransform = _lowScale;
         LowImage.Effect = _lowBlur;
@@ -211,6 +224,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return ext + " · " + size + dim;
         }
     }
+
+    // ==================================================================
+    // GPU 加速
+    // ==================================================================
+
+    public string GpuLabel => GpuResampler.GpuActive ? "CUDA" : "CPU";
+
+    public string GpuBackground => GpuResampler.GpuActive ? "#3ddc84" : "#2a2f3a";
+
+    public string GpuForeground => GpuResampler.GpuActive ? "#101216" : "#e8ecf4";
+
+    public string GpuLine => "x64 · Windows · " + GpuResampler.StatusText;
+
+    public string GpuTip => GpuResampler.GpuActive
+        ? $"GPU 加速已开启\n{GpuAccel.DeviceName}\n点击切到 CPU 渲染（Ctrl+G）"
+        : $"当前为 CPU 渲染{(GpuAccel.Available ? "（已手动关闭 GPU）" : "\n" + GpuAccel.FailReason)}\n点击开启 CUDA 加速（Ctrl+G）";
 
     public string SlideLabel => _playing ? "暂停" : "幻灯片";
     public string SlideBackground => _playing ? "#f6c85f" : "#2a2f3a";
@@ -578,6 +607,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _zoom = Clamp(_zoom * factor, MinScale, MaxScale);
         UpdateTransform();
         RefreshImageInfo();
+        ScheduleRefine();
         Status = $"缩放 {Math.Round(_zoom * 100)}%";
     }
 
@@ -614,6 +644,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _zoom = next;
         UpdateTransform();
         RefreshImageInfo();
+        ScheduleRefine();
         Status = $"缩放 {Math.Round(_zoom * 100)}%";
     }
 
@@ -634,6 +665,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _zoom = Clamp(1 / f, MinScale, MaxScale);
         UpdateTransform();
         RefreshImageInfo();
+        ScheduleRefine();
         Status = $"1:1 原始像素（{_imgW} × {_imgH}）";
     }
 
@@ -641,6 +673,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         _rot = (_rot + delta + 360) % 360;
         UpdateTransform();
+        ScheduleRefine();
         Status = $"旋转 {_rot}°";
     }
 
@@ -805,6 +838,117 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         UpdateTransform();
         RefreshImageInfo();
         FinishFocus();
+
+        // 清晰图就位后，再让 GPU 按屏幕实际像素精修一次（缩放停止后也会重做）
+        _ = RefineViewAsync(ret, token);
+    }
+
+    // ==================================================================
+    // GPU 精修
+    // ==================================================================
+
+    private const int RefineDelayMs = 140;
+
+    /// <summary>
+    /// 把已解码的位图在 GPU 上重采样到「屏幕实际显示像素」尺寸。
+    ///
+    /// 显示链路原本是：位图(画布长边×2) → WPF Stretch 缩放 → 屏幕。
+    /// 中间那步是 WPF 的插值，缩小比例大时偏软。GPU 精修把它换成 Mitchell
+    /// （带 area sampling 的抗走样降采样），并且输出恰好等于显示像素，
+    /// 于是 WPF 拿到的是 1:1 位图，不再二次采样。
+    ///
+    /// 放大不做精修（那只会凭空造像素），交给 WPF 的 RenderTransform。
+    /// </summary>
+    private async Task RefineViewAsync(DecodedImage src, long token)
+    {
+        long seq = ++_refineSeq;
+        if (!GpuResampler.GpuActive)
+        {
+            return;
+        }
+
+        await Task.Delay(RefineDelayMs);
+        if (seq != _refineSeq || token != _curToken)
+        {
+            return;
+        }
+
+        (int w, int h) = TargetPixelSize(src);
+        GpuDiagnose($"refine 目标 {w}x{h}  位图 {src.Source.PixelWidth}x{src.Source.PixelHeight}  原图 {src.Width}x{src.Height}");
+
+        if (w <= 0 || h <= 0)
+        {
+            return;
+        }
+
+        if (w >= src.Source.PixelWidth || h >= src.Source.PixelHeight)
+        {
+            return; // 已经是 1:1 或需要放大，保持原图
+        }
+
+        BitmapSource? refined;
+        try
+        {
+            refined = await Task.Run(() => GpuResampler.Resize(src.Source, w, h));
+        }
+        catch (Exception ex)
+        {
+            GpuDiagnose($"refine 异常 {ex.GetType().Name}: {ex.Message}");
+            return;
+        }
+
+        if (refined is null)
+        {
+            GpuDiagnose("refine 返回 null（重采样失败）");
+            return;
+        }
+
+        if (seq != _refineSeq || token != _curToken)
+        {
+            return;
+        }
+
+        MainImage.Source = refined;
+    }
+
+    /// <summary>当前 zoom / 旋转 / DPI 下，这张图实际占多少屏幕像素。</summary>
+    private (int W, int H) TargetPixelSize(DecodedImage img)
+    {
+        double f = FitFactor();
+        if (f <= 0 || img.Width <= 0 || img.Height <= 0)
+        {
+            return (0, 0);
+        }
+
+        double dpi = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        int w = (int)Math.Round(img.Width * f * _zoom * dpi);
+        int h = (int)Math.Round(img.Height * f * _zoom * dpi);
+        return (Math.Max(1, w), Math.Max(1, h));
+    }
+
+    /// <summary>精修路径的一次性诊断（只写前 6 条），用于确认 GPU 重采样是否真的介入。</summary>
+    private static int _refineDbg;
+
+    private static void GpuDiagnose(string line)
+    {
+        if (_refineDbg >= 6)
+        {
+            return;
+        }
+
+        _refineDbg++;
+        GpuAccel.WriteLog(line);
+    }
+
+    /// <summary>缩放/旋转/换图后请求一次 GPU 精修；连续操作只保留最后一次。</summary>
+    private void ScheduleRefine()
+    {
+        if (_viewOwned is null)
+        {
+            return;
+        }
+
+        _ = RefineViewAsync(_viewOwned, _curToken);
     }
 
     private void NoteShown(string path)
@@ -827,6 +971,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         long seq = _focusSeq;
         NoteShown(img.Path);
 
+        _lowSource = img.Source;
         LowImage.Source = img.Source;
         _blurRadius = BlurMax;
         _lowOpacity = 1;
@@ -888,19 +1033,76 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void UpdateLowLayer()
     {
-        _lowBlur.Radius = _blurRadius;
         LowImage.Opacity = _lowOpacity;
+
+        // GPU 可用时改用 CUDA 高斯模糊；否则沿用 WPF 的 BlurEffect（它本身也是 GPU shader）
+        if (GpuResampler.GpuActive && _lowSource is not null && _blurRadius > 0.01)
+        {
+            // 低清图会被放大到画布尺寸显示，模糊半径要按同一个比例折算，
+            // 否则「低清图上 14px 的模糊」在屏幕上会显得比 BlurEffect 的 14 更大。
+            double scale = _lowSource.PixelWidth > 0 && FrameW > 0
+                ? FrameW / _lowSource.PixelWidth
+                : 1;
+            double sigma = _blurRadius * Math.Clamp(scale, 0.25, 4.0);
+
+            BitmapSource? blurred = CachedBlur(_lowSource, sigma);
+            if (blurred is not null)
+            {
+                LowImage.Effect = null;
+                LowImage.Source = blurred;
+            }
+            else
+            {
+                _lowBlur.Radius = _blurRadius;
+                LowImage.Effect = _lowBlur;
+            }
+        }
+        else
+        {
+            _lowBlur.Radius = _blurRadius;
+            LowImage.Effect = _lowBlur;
+        }
+
         UpdateTransform(); // focusZoom 变了，缩放要跟着同步
+    }
+
+    /// <summary>
+    /// 模糊结果缓存：一次对焦动画只有 4 档半径，缓存后只在首帧真正调 GPU。
+    /// 半径按 0.5 粒度量化，避免每帧都算新权重。
+    /// </summary>
+    private BitmapSource? CachedBlur(BitmapSource src, double sigma)
+    {
+        int key = Math.Clamp((int)Math.Round(sigma * 2), 1, 512);
+        if (_blurCache.TryGetValue((src, key), out BitmapSource? hit))
+        {
+            return hit;
+        }
+
+        BitmapSource? made = GpuResampler.Blur(src, key / 2.0);
+        if (made is null)
+        {
+            return null;
+        }
+
+        if (_blurCache.Count > 48)
+        {
+            _blurCache.Clear();
+        }
+
+        _blurCache[(src, key)] = made;
+        return made;
     }
 
     private void ClearBlur()
     {
         _focusSeq++;
+        _lowSource = null;
         LowImage.Source = null;
         LowImage.Opacity = 0;
         _lowBlur.Radius = 0;
         _blurRadius = 0;
         _lowOpacity = 0;
+        _blurCache.Clear();
     }
 
     // ==================================================================
@@ -1300,6 +1502,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        // Ctrl+G：GPU 加速开关（其余快捷键不接修饰键，故单独在这里判）
+        if (e.Key == Key.G && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
+        {
+            ToggleGpu();
+            e.Handled = true;
+            return;
+        }
+
         switch (e.Key)
         {
             case Key.Left:
@@ -1528,6 +1738,33 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         ResetView();
         Status = "已适应窗口";
+    }
+
+    private void ActGpu(object sender, RoutedEventArgs e) => ToggleGpu();
+
+    /// <summary>切换 GPU / CPU 渲染路径，便于直接对比画质与流畅度。</summary>
+    private void ToggleGpu()
+    {
+        GpuResampler.Enabled = !GpuResampler.Enabled;
+        RefreshGpu();
+
+        Status = GpuResampler.GpuActive
+            ? $"GPU 加速已开启 · {GpuAccel.DeviceName}"
+            : GpuAccel.Available
+                ? "已切到 CPU 渲染（GPU 仍可用，Ctrl+G 切回）"
+                : $"CPU 渲染 · {GpuAccel.FailReason}";
+
+        _blurCache.Clear();
+        ScheduleRefine();
+    }
+
+    private void RefreshGpu()
+    {
+        OnPropertyChanged(nameof(GpuLabel));
+        OnPropertyChanged(nameof(GpuBackground));
+        OnPropertyChanged(nameof(GpuForeground));
+        OnPropertyChanged(nameof(GpuLine));
+        OnPropertyChanged(nameof(GpuTip));
     }
 
     private void ActOne(object sender, RoutedEventArgs e) => ZoomPixelPerfect();

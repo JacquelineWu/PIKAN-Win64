@@ -20,6 +20,11 @@
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- CUDA kernel 源码（PTX）：随输出目录复制，驱动在运行时 JIT 编译 -->
+    <Content Include="Kernels\pikan.ptx" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <!--
     日常开发：dotnet build  →  框架依赖的 PIKAN.exe（需本机装 .NET 10 桌面运行时）
     分发单文件：dotnet publish -c Release -r win-x64 -p:SelfContained=true -p:PublishSingleFile=true

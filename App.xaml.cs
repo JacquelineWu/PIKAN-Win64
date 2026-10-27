@@ -9,6 +9,15 @@ public partial class App : Application
 {
     protected override void OnStartup(StartupEventArgs e)
     {
+        // --nogpu：强制走 CPU 渲染，便于对比画质 / 排查 GPU 相关问题
+        foreach (string a in e.Args)
+        {
+            if (string.Equals(a, "--nogpu", StringComparison.OrdinalIgnoreCase))
+            {
+                GpuResampler.Enabled = false;
+            }
+        }
+
         base.OnStartup(e);
 
         MainWindow window = new();

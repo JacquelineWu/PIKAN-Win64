@@ -60,6 +60,13 @@
                             Foreground="{Binding SlideForeground}"
                             Margin="7,3,3,3"
                             Click="ActSlide" />
+                    <Button Content="{Binding GpuLabel}"
+                            Style="{StaticResource ToolButton}"
+                            Background="{Binding GpuBackground}"
+                            Foreground="{Binding GpuForeground}"
+                            Margin="7,3,3,3"
+                            ToolTip="{Binding GpuTip}"
+                            Click="ActGpu" />
                 </StackPanel>
             </Grid>
         </Border>
@@ -350,10 +357,11 @@
                            VerticalAlignment="Center"
                            TextTrimming="CharacterEllipsis" />
                 <TextBlock Grid.Column="1"
-                           Text="x64 · Windows · WPF 合成"
+                           Text="{Binding GpuLine}"
                            FontSize="11"
                            Foreground="#5a6272"
-                           VerticalAlignment="Center" />
+                           VerticalAlignment="Center"
+                           ToolTip="{Binding GpuTip}" />
             </Grid>
         </Border>
     </Grid>

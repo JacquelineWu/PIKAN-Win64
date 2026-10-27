@@ -59,12 +59,52 @@ bin\Release\net10.0-windows\PIKAN.exe
 dotnet publish -c Release -r win-x64 -p:SelfContained=true -p:PublishSingleFile=true
 ```
 
+## GPU 加速（CUDA 优先）
+
+PIKAN 自带一层 CUDA 加速：**不装 CUDA Toolkit、不引任何 NuGet 包**，
+直接 P/Invoke 驱动自带的 `nvcuda.dll`（CUDA Driver API），把手写的 PTX 交给驱动 JIT 编译执行。
+
+```
+GpuAccel.cs       CUDA 上下文 + PTX JIT + kernel 调度 + 设备缓冲复用（失败自动降级）
+GpuResampler.cs   BitmapSource ↔ CUDA 的桥接，不可用时回落 WIC
+Kernels/pikan.ptx kernel 源码（文本，随输出目录复制，驱动运行时 JIT）
+```
+
+### kernel
+
+| kernel | 用途 | 说明 |
+|---|---|---|
+| `resize_mitchell` | 主视图精修 | Mitchell-Netravali，带 area sampling（缩放比越大核越宽，抗走样），每方向最多 16 taps，权重归一化 |
+| `resize_bilinear` | 兜底重采样 | 结构最简单，Mitchell 不可用时顶上 |
+| `gauss_h` / `gauss_v` | 切图过渡的模糊 | 分离高斯，权重由 host 预计算后上传，半径取 3σ |
+
+### 介入点
+
+1. **主视图精修**：清晰图解码完成后，GPU 把它重采样到「屏幕实际显示像素」尺寸
+   （原图尺寸 × FitFactor × zoom × DPI）。输出恰好等于显示像素，WPF 不再二次采样，
+   且降采样用的是 Mitchell 而不是 WPF 的插值 —— 缩放/旋转停止 140ms 后重做一次，连续操作只保留最后一次。
+   放大不精修（那只会凭空造像素），交给 `RenderTransform`。
+2. **切图对焦动画**：过渡层的模糊改用 CUDA 高斯（结果按 0.5 粒度量化缓存，一次动画只在首帧真调 GPU）。
+   低清图会被放大到画布显示，所以 σ 按 `FrameW / 低清图宽` 折算，视觉强度才与 `BlurEffect` 对齐。
+
+### 降级与开关
+
+CUDA 不可用时（无 NVIDIA 卡 / 驱动太旧 / PTX 加载失败）全部安静回落：
+精修走 WIC 的 `TransformedBitmap`，模糊继续用 WPF 的 `BlurEffect`（它本身也是 GPU shader）。
+
+- 顶栏 `CUDA` / `CPU` 按钮点击切换，**Ctrl+G** 同效，状态栏右端显示当前后端与设备名
+- 启动参数 `--nogpu` 强制 CPU 渲染，便于对比
+- 诊断日志写在 `%LOCALAPPDATA%\PIKAN\gpu.log`（只记初始化与异常，正常路径几乎不写盘）
+
+PTX 的 `.target` 会在加载失败时按 `sm_86 → sm_75 → sm_70` 依次改写重试，
+覆盖 Volta 及之后的绝大多数 NVIDIA 显卡。
+
 ## 工程结构
 
 ```
 PIKAN-Win64/
 ├── PIKAN.csproj              net10.0-windows + UseWPF + UseWindowsForms，x64
-├── App.xaml / .cs            启动 + 命令行参数（PIKAN.exe <图片 或 文件夹>）
+├── App.xaml / .cs            启动 + 命令行参数（PIKAN.exe <图片 或 文件夹> [--nogpu]）
 ├── MainWindow.xaml           ACDSee 三段式布局（顶栏 / 主体 / 状态栏）
 ├── MainWindow.xaml.cs        全部 UI 与交互逻辑
 ├── ImageItem.cs              列表项（路径 / 文件名 / 体积 / 缩略图，INotifyPropertyChanged）
@@ -72,6 +112,9 @@ PIKAN-Win64/
 ├── ThumbLoader.cs            缩略图 LRU（600 张）+ 限并发（3）+ 限队列（240）
 ├── PreviewCache.cs           低清预览 LRU（48 张 / 96MB）+ 跟随位置的窗口淘汰
 ├── StateStore.cs             位置记忆 + 列表快照 → %LOCALAPPDATA%\PIKAN\state.json
+├── GpuAccel.cs               CUDA Driver API：上下文 / PTX JIT / kernel 调度 / 缓冲复用
+├── GpuResampler.cs           BitmapSource ↔ GPU 桥接 + WIC 回落
+├── Kernels/pikan.ptx         CUDA kernel 源码（驱动运行时 JIT）
 └── LICENSE / README.md
 ```
 
@@ -97,9 +140,25 @@ PIKAN-Win64/
 - **拖放**：把图片文件或文件夹拖进窗口即载入
 - **命令行 / 打开方式**：`PIKAN.exe <图片 或 文件夹>`
 - **双击复位**之外，右键菜单冲突已屏蔽（右键不弹系统菜单）
+- **CUDA 加速**：Mitchell 精修 + GPU 高斯模糊，见上文「GPU 加速」章节
 
 ## 验证状态
 
 - `dotnet build -c Release`：**0 Warning / 0 Error**
 - 冒烟测试（8 张 PNG + BMP）：进程正常、窗口响应、文件夹扫描 → 解码 → 显示 → 位置记忆落盘全部走通
 - HEIC 实机解码：**尚未用真实 HEIC 文件验证**（本机没有样本），依赖系统 HEIF 扩展
+
+### CUDA kernel 验证
+
+每个 kernel 都写了独立的 CPU 参考实现做逐字节比对（随机噪声图，容差 1/255）：
+
+| kernel | 用例 | 结果 |
+|---|---|---|
+| `resize_mitchell` | 8×8→4×4、4×4→8×8、8×8→8×8、16×9→7×5、64×48→16×12 | 全部 **maxDiff = 0** |
+| `gauss_h` / `gauss_v` | 12×12、σ=2、r=6 | **maxDiff = 0** |
+| 常数图归一化自检 | 1×1→4×4、4×4→8×8、8×8→4×4、7×5→16×9 | 偏差 **0** |
+
+实测（RTX 3080 Laptop / 48 SM / sm_86 / CUDA 13.4，含 H2D + D2H）：
+
+- 重采样 1920×1080 → 960×540：**约 3.7 ms**
+- 高斯模糊 1920×1080、r=42：**约 6.6 ms**
