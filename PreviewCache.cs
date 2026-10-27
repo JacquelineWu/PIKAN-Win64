@@ -30,6 +30,12 @@ public sealed class PreviewCache
     /// <summary>当前预载档位（长边像素）。画布尺寸变化时由主窗口更新。</summary>
     public int Edge { get; set; } = 1280;
 
+    /// <summary>
+    /// 关掉「窗口环绕」（仅用于 --nowrap 做 A/B 对比）。
+    /// 打开后窗口按线性截断，跨首尾时会重新解码一批图。
+    /// </summary>
+    public static bool NoWrap;
+
     private readonly List<DecodedImage> _items = new();
     private long _bytes;
 
@@ -93,12 +99,23 @@ public sealed class PreviewCache
             return;
         }
 
-        int lo = Math.Max(0, cur - back);
-        int hi = Math.Min(items.Count - 1, cur + fwd);
+        // 循环窗口：末尾的「前方」绕回开头，开头的「后方」绕回末尾。
+        // Go() 本来就是模运算循环的，缓存窗口若还按线性截断，
+        // 每次跨过首尾边界都要重新解码一批图。
+        int n = items.Count;
+        int b = NoWrap ? back : Math.Min(back, n - 1);
+        int f = NoWrap ? fwd : Math.Min(fwd, n - 1);
+
         HashSet<string> window = new(StringComparer.OrdinalIgnoreCase);
-        for (int i = lo; i <= hi; i++)
+        for (int k = -b; k <= f; k++)
         {
-            window.Add(items[i].Path);
+            int raw = cur + k;
+            if (NoWrap && (raw < 0 || raw >= n))
+            {
+                continue;
+            }
+
+            window.Add(items[((raw % n) + n) % n].Path);
         }
 
         for (int i = _items.Count - 1; i >= 0; i--)

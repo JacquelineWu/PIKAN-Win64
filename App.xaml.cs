@@ -39,6 +39,11 @@ public partial class App : Application
                 GpuImageCache.Enabled = false;
                 GpuResampler.ResultCacheEnabled = false;
             }
+            else if (string.Equals(a, "--nowrap", StringComparison.OrdinalIgnoreCase))
+            {
+                // A/B 对照用：预载窗口按线性截断，跨首尾时重新解码一批图
+                PreviewCache.NoWrap = true;
+            }
         }
 
         base.OnStartup(e);

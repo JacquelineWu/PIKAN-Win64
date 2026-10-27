@@ -1153,6 +1153,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // ==================================================================
 
     /// <summary>当前预载窗口内的所有路径（给显存缓存做滑动淘汰用）。</summary>
+    /// <summary>
+    /// 图库是循环的（翻过最后一张就回到第一张），所以索引一律绕回。
+    /// 否则翻到末尾时「前面那 20 张」会被算成窗口外而淘汰掉，
+    /// 等真绕回第一张时缓存是空的，就会卡一下。
+    /// </summary>
+    private static int WrapIndex(int i, int n) => n <= 0 ? 0 : ((i % n) + n) % n;
+
     private HashSet<string> WindowPaths()
     {
         HashSet<string> set = new(StringComparer.OrdinalIgnoreCase);
@@ -1161,11 +1168,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return set;
         }
 
-        int lo = Math.Max(0, _cur - PreloadBack);
-        int hi = Math.Min(_items.Count - 1, _cur + PreloadFwd);
-        for (int i = lo; i <= hi; i++)
+        int n = _items.Count;
+        int back = PreviewCache.NoWrap ? PreloadBack : Math.Min(PreloadBack, n - 1);
+        int fwd = PreviewCache.NoWrap ? PreloadFwd : Math.Min(PreloadFwd, n - 1);
+
+        for (int k = -back; k <= fwd; k++)
         {
-            set.Add(_items[i].Path);
+            int raw = _cur + k;
+            if (PreviewCache.NoWrap && (raw < 0 || raw >= n))
+            {
+                continue;
+            }
+
+            set.Add(_items[WrapIndex(raw, n)].Path);
         }
 
         return set;
@@ -1206,16 +1221,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 long mySeq = _preloadSeq;
                 string? target = null;
 
-                // 先补「前方」（主要浏览方向）
-                for (int k = 1; k <= PreloadFwd; k++)
+                // 先补「前方」（主要浏览方向）。绕回：末尾之后接着补开头那几张，
+                // 这样翻过最后一张回到第一张时，第一张早已在缓存里。
+                int n = _items.Count;
+                int fwd = PreviewCache.NoWrap ? PreloadFwd : Math.Min(PreloadFwd, n - 1);
+                int back = PreviewCache.NoWrap ? PreloadBack : Math.Min(PreloadBack, n - 1);
+
+                for (int k = 1; k <= fwd; k++)
                 {
-                    int i = _cur + k;
-                    if (i >= _items.Count)
+                    int raw = _cur + k;
+                    if (PreviewCache.NoWrap && raw >= n)
                     {
                         break;
                     }
 
-                    string u = _items[i].Path;
+                    string u = _items[WrapIndex(raw, n)].Path;
                     if (_previews.Get(u) is null && !_failed.Contains(u))
                     {
                         target = u;
@@ -1226,15 +1246,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 // 再补「后方」：否则快速往回滚时一张都命中不了缓存
                 if (target is null)
                 {
-                    for (int k = 1; k <= PreloadBack; k++)
+                    for (int k = 1; k <= back; k++)
                     {
-                        int i = _cur - k;
-                        if (i < 0)
+                        int raw = _cur - k;
+                        if (PreviewCache.NoWrap && raw < 0)
                         {
                             break;
                         }
 
-                        string u = _items[i].Path;
+                        string u = _items[WrapIndex(raw, n)].Path;
                         if (_previews.Get(u) is null && !_failed.Contains(u))
                         {
                             target = u;
@@ -1941,6 +1961,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 CanvasArea.RaiseEvent(e);
             });
             await Task.Delay(40);
+        }
+
+        // 边界轮：停在倒数第 3 张，等预载把「绕回开头那几张」也补上，
+        // 再连翻 6 张跨过首尾边界。这 6 次若全是「缓存命中」，说明循环预载真的生效了。
+        await Task.Delay(1500);
+        Perf.Note("==== bench 边界轮：翻过最后一张绕回第一张 ====");
+
+        int total = _items.Count;
+        await Dispatcher.InvokeAsync(() => Go(total - 3 - _cur));
+        await Task.Delay(4000); // 给预载留出绕回补张的时间
+
+        for (int i = 0; i < 6; i++)
+        {
+            await Dispatcher.InvokeAsync(() => Go(1));
+            await Task.Delay(350);
         }
 
         await Task.Delay(5000); // 等最后一次全清 / 精修落定
