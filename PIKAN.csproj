@@ -31,14 +31,21 @@
 
   <!--
     日常开发：dotnet build  →  框架依赖的 PIKAN.exe（需本机装 .NET 10 桌面运行时）
-    分发单文件（自包含，目标机无需装 .NET，约 66MB，需联网拉运行时包）：
 
-      dotnet publish -c Release -r win-x64 /p:SelfContained=true
-        /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true
-        /p:EnableCompressionInSingleFile=true /p:DebugType=none /p:SatelliteResourceLanguages=en
+    分发：只出「便携版」（自包含多文件目录 portable\）。曾经也发过单文件 exe，已弃用：
+    WPF 的 native 组件进不了 bundle，靠运行时自解压到临时目录，一旦被安全软件或目录权限
+    拦住就是「双击毫无反应」的静默退出（本机复现过 Error code: 5）。便携版不做自解压，更稳。
 
-    IncludeNativeLibrariesForSelfExtract 让 WPF 的 native 组件也进 exe，发布目录只有一个文件。
-    注意：root namespace 下的 Kernels\pikan.ptx 是嵌入资源，单文件下照样读得到。
+      dotnet publish -c Release -r win-x64 /p:SelfContained=true -p:PublishSingleFile=false ^
+        -p:DebugType=none -p:SatelliteResourceLanguages=en -o portable
+
+    一键出包（含签名）用 Publish.ps1。Kernels\pikan.ptx 是嵌入资源，任何形态都读得到。
   -->
+
+  <PropertyGroup>
+    <!-- 锁死：避免哪天手滑 publish 出单文件 exe -->
+    <PublishSingleFile>false</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>false</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
 
 </Project>

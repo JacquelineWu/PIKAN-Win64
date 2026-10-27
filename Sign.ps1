@@ -5,7 +5,7 @@
 # 把根证书导入目标机后即可正常启动。
 #
 # 用法（PowerShell 7）：
-#   pwsh .\Sign.ps1                      # 签 .\PIKAN.exe
+#   pwsh .\Sign.ps1                      # 签 portable\PIKAN.exe（唯一的发布形态）
 #   pwsh .\Sign.ps1 -Exe D:\PIKAN.exe    # 签指定文件
 #   pwsh .\Sign.ps1 -Force               # 已有本证书签名也重新签
 #   pwsh .\Sign.ps1 -NewCert             # 丢弃旧证书，重新签发一张
@@ -13,7 +13,7 @@
 # 依赖：Windows SDK 的 signtool（脚本会自动在 Windows Kits 下找），签名时可联网打时间戳。
 
 param(
-    [string] $Exe = (Join-Path $PSScriptRoot 'PIKAN.exe'),
+    [string] $Exe = (Join-Path $PSScriptRoot 'portable' 'PIKAN.exe'),
     [string] $Subject = 'CN=JacquelineWu (PIKAN), O=JacquelineWu, C=CN',
     [string] $TimestampServer = 'http://timestamp.digicert.com',
     [switch] $Force,

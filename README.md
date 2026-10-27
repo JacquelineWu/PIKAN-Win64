@@ -73,70 +73,65 @@ bin\Release\net10.0-windows\PIKAN.exe
 需要 **.NET 10 SDK**（`net10.0-windows`，含 WPF / WindowsDesktop 运行时）。
 本仓库用 Visual Studio 2026 / `dotnet build` 均可，无第三方包，restore 秒过。
 
-### 独立单文件 exe（可拷到任意 Win64 机器）
+### 便携版（唯一的发布形态）
 
-仓库根目录的 **`PIKAN.exe`（约 69 MB）** 就是自包含单文件版本：**目标机不用装 .NET，不用装 CUDA Toolkit，
-不依赖任何外部文件**——双击即用，拷到 U 盘也行。
+`portable\PIKAN.exe` 是**自包含多文件版**（整个目录约 155 MB）：
 
-重新生成：
+- 目标机**不用装 .NET**，也不用装 CUDA Toolkit
+- **不做运行时自解压**——不往 `%TEMP%` 写一个字节，双击即开
+- 已做代码签名（见「SmartScreen 拦截怎么办」）
+
+把整个 `portable` 文件夹拷到 U 盘 / 别的 Win64 机器即可，双击里面的 `PIKAN.exe` 就用。
+
+一键出包（编译 → 发布 → 签名）：
+
+```bat
+pwsh .\Publish.ps1
+pwsh .\Publish.ps1 -NoSign        :: 只发布，不签名（本机快速调试）
+pwsh .\Publish.ps1 -Out D:\PIKAN  :: 输出到别处，例如直接发到 U 盘
+```
+
+它等价于下面这几步：
 
 ```bat
 dotnet publish -c Release -r win-x64 --self-contained true ^
-  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true ^
-  -p:EnableCompressionInSingleFile=true -p:DebugType=none -p:SatelliteResourceLanguages=en
+  -p:PublishSingleFile=false -p:DebugType=none -p:SatelliteResourceLanguages=en -o portable
 
-copy bin\Release\net10.0-windows\win-x64\publish\PIKAN.exe PIKAN.exe
+pwsh .\Sign.ps1
 ```
+
+**为什么不再发单文件 exe**：单文件版启动时必须把 WPF 的 native 组件
+（`wpfgfx_cor3.dll`、`PresentationNative_cor3.dll`、`D3DCompiler_47_cor3.dll` 等）
+自解压到临时目录。这一步一旦被安全软件或目录权限拦住，进程会在托管代码**之前**退出，
+而 WPF 程序没有控制台，错误文本无处显示——表现就是「双击毫无反应」。
+本机稳定复现过 `Failed to create directory [...] Error code: 5`（`%TEMP%` 不允许建提取目录）。
+便携版不做自解压，这条失败路径根本不存在，代价只是目录里多一堆 dll。
 
 几个已知事项：
 
-- `IncludeNativeLibrariesForSelfExtract` 是必需的：WPF 的 native 组件（`wpfgfx_cor3.dll`、
-  `PresentationNative_cor3.dll`、`D3DCompiler_47_cor3.dll` 等）没法压进单文件 bundle，
-  靠它在运行时自解压，所以发布目录里最终只有一个 exe。
-- 首次启动会比框架依赖版慢一点（压缩 bundle 要解压），之后有缓存。
-- PTX kernel 已**嵌入程序集**（`EmbeddedResource`），单文件下 `Assembly.Location` 为空也能读到；
-  如果想换 kernel 调试，在 exe 旁边放 `Kernels\pikan.ptx` 会优先用外部的。
+- PTX kernel 已**嵌入程序集**（`EmbeddedResource`），任何形态都读得到；
+  想换 kernel 调试就在 exe 旁边放 `Kernels\pikan.ptx`，会优先用外部的。
 - 目标机上 GPU 加速要生效，需要 NVIDIA 驱动（Volta 及以上）；否则自动回落 CPU，功能不受影响。
-- 看 HEIC 需要目标机装微软的 **HEIF Image Extension**（微软商店免费）。
-
-### 便携版（免自解压，打不开时的首选）
-
-`portable\PIKAN.exe` 是**自包含多文件版**（整个目录约 155 MB）：目标机不用装 .NET，
-而且**不做运行时自解压**——不往 `%TEMP%` 写一个字节，双击即开。
-把整个 `portable` 文件夹拷到 U 盘 / 别的 Win64 机器就能用，已签名。
-
-```bat
-dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false ^
-  -p:DebugType=none -p:SatelliteResourceLanguages=en -o portable
-
-pwsh .\Sign.ps1 -Exe portable\PIKAN.exe
-```
-
-单文件版胜在"就一个文件"，便携版胜在"一定能开"。两个都留着。
+- 看 HEIC 需要目标机装微软的 **HEIF Image Extension**（微软商店免费）；
+  WEBP 同理需要「Webp Image Extensions」。
 
 ### 双击后毫无反应 / 闪退怎么办
 
-单文件 exe 启动时要把 WPF 的 native 组件解压到临时目录；这一步若被安全软件或目录权限拦住，
-进程会在托管代码**之前**就退出。WPF 程序没有控制台，错误文本无处显示，
-所以表现就是「双击后什么都没发生」。
+便携版不做自解压，所以**历史故障（单文件版自解压被拒）已经不存在了**。
+如果仍然打不开，按下面顺序定位：
 
-先确认是否中招——在 PowerShell 里跑一次，能直接看到原因：
+1. **看崩溃日志**：`%LOCALAPPDATA%\PIKAN\crash.log`。凡是进入 `App` 之后的未处理异常
+   都会写这里并弹窗，不会"静默闪退"。
+2. **在 PowerShell 里跑一次**，把本来看不见的 host 层错误抓出来：
 
-```powershell
-& .\PIKAN.exe 2>&1
-# Failure processing application bundle.
-# Failed to create directory [...] for extracting bundled files. Error code: 5   ← 就是它
-```
+   ```powershell
+   & .\portable\PIKAN.exe 2>&1
+   ```
 
-三种解法，任选其一：
+3. **看 Windows 事件日志**：应用程序日志里的 `.NET Runtime` / `Application Error`，
+   以及 GPU 相关的看 `%LOCALAPPDATA%\PIKAN\gpu.log`。
 
-| 解法 | 做法 |
-|---|---|
-| 用便携版（最省事） | 双击 `portable\PIKAN.exe`，完全不走自解压 |
-| 换提取目录 | `setx DOTNET_BUNDLE_EXTRACT_BASE_DIR "%LOCALAPPDATA%\PIKAN\Extract"`，然后**注销重登录**（或重启资源管理器）再双击 |
-| 清旧缓存 | `rmdir /s %TEMP%\.net\PIKAN`（提取缓存可安全删除，下次运行会重建） |
-
-程序侧也已加固：凡是进入了 `App` 之后的未处理异常，都会弹窗提示并写入
+程序侧已加固：未处理异常会弹窗提示并写入
 `%LOCALAPPDATA%\PIKAN\crash.log`，不会再"静默闪退"；CUDA 探测也挪到了后台线程，
 驱动初始化再慢也不会拖住窗口显示。
 
@@ -151,7 +146,7 @@ pwsh .\Sign.ps1 -Exe portable\PIKAN.exe
 | 自签证书（已做） | 自己的多台机器 | 见下，拷 exe 时带上 `PIKAN-CodeSigning.cer` |
 | 购买代码签名证书 | 对外公开发布 | OV 证书约 ¥1000–3000/年；EV 还能立刻建立 SmartScreen 信誉 |
 
-**本仓库的 exe 已签名**：SHA256 + DigiCert RFC3161 时间戳，发布者
+**发布出的 `portable\PIKAN.exe` 已签名**：SHA256 + DigiCert RFC3161 时间戳，发布者
 `CN=JacquelineWu (PIKAN)`，有效期至 2031-10-27（有时间戳，证书过期后签名依然有效）。
 
 拷到另一台机器时，把 `PIKAN-CodeSigning.cer` 一起拷过去并执行：
@@ -164,7 +159,7 @@ certutil -addstore -user TrustedPublisher PIKAN-CodeSigning.cer
 重新编译后要重签：
 
 ```bat
-pwsh .\Sign.ps1                :: 签 .\PIKAN.exe
+pwsh .\Sign.ps1                :: 签 portable\PIKAN.exe
 pwsh .\Sign.ps1 -Force         :: 强制重签
 pwsh .\Sign.ps1 -NewCert       :: 换一张新证书
 ```
@@ -230,6 +225,8 @@ PIKAN-Win64/
 ├── GpuAccel.cs               CUDA Driver API：上下文 / PTX JIT / kernel 调度 / 缓冲复用
 ├── GpuResampler.cs           BitmapSource ↔ GPU 桥接 + WIC 回落
 ├── Kernels/pikan.ptx         CUDA kernel 源码（驱动运行时 JIT）
+├── Publish.ps1               一键出包：编译 → 发布 portable\ → 签名
+├── Sign.ps1                  Authenticode 自签（默认签 portable\PIKAN.exe）
 └── LICENSE / README.md
 ```
 
@@ -300,26 +297,22 @@ PIKAN-Win64/
 - 重采样 1920×1080 → 960×540：**约 3.7 ms**
 - 高斯模糊 1920×1080、r=42：**约 6.6 ms**
 
-### 独立 exe 验证
+### 便携版验证
 
-把 `PIKAN.exe` 单独拷到一个**空目录**（模拟没装 .NET 的机器）后运行 `PIKAN.exe big.png`：
+把整个 `portable` 目录拷到一个**新位置**（模拟没装 .NET 的机器）后运行 `PIKAN.exe <图片>`：
 
 ```
 init ok        NVIDIA GeForce RTX 3080 Laptop GPU · 15GB · sm_86 · 48 SM · CUDA 13.4
-preload ready  39 张 · 70 MB · edge=1024    ← 前后各 20 张已预解码入缓存
-refine         目标 1107x830  位图 1200x900  原图 1200x900
-resize ok #1   1200x900 -> 1107x830         ← Mitchell 精修
+preload ready  41 张 · 88 MB · edge=1536    ← 前后各 20 张已预解码入缓存
+refine         目标 1107x830  位图 1478x1109  原图 1200x900
+resize ok #1   1478x1109 -> 1107x830        ← Mitchell 精修
 ```
 
-即：单文件自解压正常、嵌入的 PTX 读得到、CUDA 初始化 → 预载 → 精修全链路走通
+即：嵌入的 PTX 读得到、CUDA 初始化 → 预载 → 精修全链路走通
 （日志里已无 `blur`：切图模糊动画取消后不再调用 GPU 模糊）。
 
-补充：本机后来出现过单文件版自解压被拒（`Error code: 5`，静默退出、双击毫无反应），
-原因是这台机器的 `%TEMP%` 不允许创建提取目录。同一份 exe 只要把提取目录换到别处
-（`DOTNET_BUNDLE_EXTRACT_BASE_DIR`）就能正常启动，**便携版则完全不受影响**——
-这也是仓库里同时保留 `portable\` 的原因。详见「双击后毫无反应 / 闪退怎么办」。
+双击也直接起窗口（标题 `PIKAN`，工作集约 350 MB），
+不写 `%TEMP%`、不需要目标机装 .NET。
 
-### 便携版验证
-
-`portable\PIKAN.exe` 双击直接起窗口（标题 `PIKAN`，工作集约 350 MB），
-不写 `%TEMP%`、不需要目标机装 .NET，CUDA 链路与单文件版一致。
+> 早期版本还发过单文件 exe，出现过自解压被拒（`Error code: 5`，双击毫无反应），
+> 现已弃用，只出便携版。详见「便携版（唯一的发布形态）」。
