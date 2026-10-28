@@ -44,6 +44,17 @@ public partial class App : Application
                 // A/B 对照用：预载窗口按线性截断，跨首尾时重新解码一批图
                 PreviewCache.NoWrap = true;
             }
+            else if (string.Equals(a, "--nod3d", StringComparison.OrdinalIgnoreCase))
+            {
+                // A/B 对照用：关掉 D3D9 互操作（它要求 CUDA 与 D3D9 在同一块 GPU 上，
+                // 双显卡笔记本上 D3D9 只认集显，会自动回退）
+                GpuAccel.D3dEnabled = false;
+            }
+            else if (string.Equals(a, "--noreuse", StringComparison.OrdinalIgnoreCase))
+            {
+                // A/B 对照用：关掉复用位图，回到「每次新建 BitmapSource」的旧路径
+                ViewSurface.ReuseEnabled = false;
+            }
         }
 
         base.OnStartup(e);

@@ -1036,6 +1036,56 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return; // 已经是 1:1 或需要放大，保持原图
         }
 
+        // ① 结果缓存命中：连 kernel 都不用跑，直接把上次那张拿上来
+        if (ViewSurface.ReuseEnabled)
+        {
+            BitmapSource? hit = GpuResampler.TryResult(src.Path, src.Source, w, h);
+            if (hit is not null)
+            {
+                if (seq != _refineSeq || token != _curToken)
+                {
+                    return;
+                }
+
+                MainImage.Source = hit;
+                Perf.Tick("精修上屏[结果缓存]");
+                return;
+            }
+
+            // ② 后台算完留在显存，UI 线程再直接写进复用位图：
+            //    没有中间数组、没有新位图，尺寸不变时 WPF 也不必重建纹理。
+            bool computed;
+            try
+            {
+                Stopwatch sw2 = Stopwatch.StartNew();
+                computed = await Task.Run(() => GpuResampler.ResizeToDevice(src.Path, src.Source, w, h, src.Edge));
+                Perf.Span($"  GPU 重采样[{GpuResampler.LastFrom}] {src.Source.PixelWidth}x{src.Source.PixelHeight} → {w}x{h}",
+                          sw2.ElapsedMilliseconds);
+            }
+            catch (Exception ex)
+            {
+                GpuDiagnose($"refine 异常 {ex.GetType().Name}: {ex.Message}");
+                return;
+            }
+
+            if (computed && seq == _refineSeq && token == _curToken)
+            {
+                Stopwatch swc = Stopwatch.StartNew();
+                BitmapSource? view = ViewSurface.Instance.Commit(w, h);
+                Perf.Span("  写复用位图（回读 + 标脏）", swc.ElapsedMilliseconds);
+
+                if (view is not null)
+                {
+                    MainImage.Source = view;
+                    Perf.Tick("精修上屏[复用位图]");
+                    return;
+                }
+
+                GpuDiagnose("复用位图提交失败，回退新建位图");
+            }
+        }
+
+        // ③ 兜底：原来的「新建位图」路径（--noreuse 或复用失败时走这里）
         BitmapSource? refined;
         try
         {
@@ -1061,7 +1111,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
+        Stopwatch swo = Stopwatch.StartNew();
         MainImage.Source = refined;
+        Perf.Span("  新位图上屏（新建 + 标脏）", swo.ElapsedMilliseconds);
         Perf.Tick("精修结果上屏");
     }
 

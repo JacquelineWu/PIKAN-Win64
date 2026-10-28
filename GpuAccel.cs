@@ -41,6 +41,57 @@ internal static class CudaNative
     [DllImport(Lib)] internal static extern int cuCtxSynchronize();
     [DllImport(Lib)] internal static extern int cuGetErrorString(int err, out IntPtr str);
 
+    // ---- Direct3D 9 互操作：让 kernel 结果直接落进 D3D9 纹理 ----
+    //
+    // 驱动自带这些导出（实测 CUDA 13.4 / 驱动 617.42 上仍在），
+    // 于是「算完即上屏」不必回主机内存：算 → 设备内拷进纹理 → D3DImage 直接显示。
+
+    [DllImport(Lib, EntryPoint = "cuD3D9CtxCreate_v2")]
+    internal static extern int cuD3D9CtxCreate(out IntPtr ctx, out int dev, uint flags, IntPtr d3dDevice);
+
+    [DllImport(Lib, EntryPoint = "cuD3D9GetDevices_v2")]
+    internal static extern int cuD3D9GetDevices(out uint count, IntPtr devices, uint deviceCount,
+                                                IntPtr d3dDevice, uint deviceList);
+
+    [DllImport(Lib)] internal static extern int cuGraphicsD3D9RegisterResource(
+        out IntPtr res, IntPtr d3dResource, uint flags);
+
+    [DllImport(Lib)] internal static extern int cuGraphicsUnregisterResource(IntPtr res);
+
+    [DllImport(Lib)] internal static extern int cuGraphicsMapResources(
+        uint count, IntPtr resources, IntPtr stream);
+
+    [DllImport(Lib)] internal static extern int cuGraphicsUnmapResources(
+        uint count, IntPtr resources, IntPtr stream);
+
+    [DllImport(Lib)] internal static extern int cuGraphicsSubResourceGetMappedArray(
+        out IntPtr array, IntPtr res, uint arrayIndex, uint mipLevel);
+
+    [DllImport(Lib, EntryPoint = "cuMemcpy2D_v2")]
+    internal static extern int cuMemcpy2D(ref Memcpy2D copy);
+
+    /// <summary>CUDA_MEMCPY2D（64 位布局，共 128 字节）。</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct Memcpy2D
+    {
+        public ulong SrcXInBytes;
+        public ulong SrcY;
+        public uint SrcMemoryType;
+        public IntPtr SrcHost;
+        public ulong SrcDevice;
+        public IntPtr SrcArray;
+        public ulong SrcPitch;
+        public ulong DstXInBytes;
+        public ulong DstY;
+        public uint DstMemoryType;
+        public IntPtr DstHost;
+        public ulong DstDevice;
+        public IntPtr DstArray;
+        public ulong DstPitch;
+        public ulong WidthInBytes;
+        public ulong Height;
+    }
+
     internal static string Message(int code)
     {
         cuGetErrorString(code, out IntPtr p);
@@ -86,6 +137,20 @@ public static class GpuAccel
     private static string _device = "";
     private static string _failReason = "";
     private static ulong _totalMem;
+
+    // ---- Direct3D 9 互操作（零拷贝上屏）----
+    private static IntPtr _d3d9;        // IDirect3D9Ex
+    private static IntPtr _d3dDevice;   // IDirect3DDevice9Ex
+    private static bool _d3dCtx;        // 上下文是否建在 D3D9 设备上
+
+    /// <summary>是否允许走 D3D9 零拷贝路径（--nod3d 关掉，便于 A/B 对比）。</summary>
+    public static bool D3dEnabled { get; set; } = true;
+
+    /// <summary>是否真的建成了 D3D9 互操作上下文。只有它为真才能零拷贝上屏。</summary>
+    public static bool D3dCtxMode => _d3dCtx;
+
+    /// <summary>IDirect3DDevice9Ex 指针（建纹理用）。</summary>
+    public static IntPtr D3dDevice => _d3dDevice;
 
     /// <summary>CUDA 是否可用（首次访问时完成初始化）。</summary>
     public static bool Available
@@ -179,16 +244,76 @@ public static class GpuAccel
         }
     }
 
+    /// <summary>
+    /// 尝试在 D3D9Ex 设备上建立 CUDA 上下文。任一步失败都安静退回普通 CUDA 上下文，
+    /// 不影响既有的加速路径——零拷贝只是锦上添花，不是功能依赖。
+    /// </summary>
+    private static bool TryCreateD3dContext(out int dev)
+    {
+        dev = -1;
+        if (!D3dEnabled)
+        {
+            Log("d3d: 已被 --nod3d 关闭");
+            return false;
+        }
+
+        IntPtr d3d = D3d9.Create();
+        if (d3d == IntPtr.Zero)
+        {
+            Log("d3d: Direct3DCreate9Ex 失败，回退纯 CUDA 路径");
+            return false;
+        }
+
+        int adapter = D3d9.FindAdapter(d3d, 0x10DE);   // NVIDIA
+        Log($"d3d: NVIDIA 适配器序号 = {adapter}（{D3d9.LastDiag}）");
+
+        if (!D3d9.CreateDevice(d3d, adapter, out IntPtr dev9))
+        {
+            D3d9.Release(ref d3d);
+            Log("d3d: CreateDeviceEx 失败，回退纯 CUDA 路径");
+            return false;
+        }
+
+        int g = CudaNative.cuD3D9GetDevices(out uint cnt, IntPtr.Zero, 0, dev9, 0);
+        Log($"d3d: cuD3D9GetDevices → {g} {CudaNative.Message(g)}，可用设备 {cnt} 个");
+
+        int r = CudaNative.cuD3D9CtxCreate(out IntPtr ctx, out int d, 0, dev9);
+        if (r != 0 || ctx == IntPtr.Zero)
+        {
+            Log($"d3d: cuD3D9CtxCreate 失败 {r} {CudaNative.Message(r)}，回退纯 CUDA 路径");
+            D3d9.Release(ref dev9);
+            D3d9.Release(ref d3d);
+            return false;
+        }
+
+        _ctx = ctx;
+        _d3d9 = d3d;
+        _d3dDevice = dev9;
+        _d3dCtx = true;
+        dev = d;
+        Log("d3d: 上下文建在 D3D9Ex 设备上（结果可直接写进纹理）");
+        return true;
+    }
+
     private static bool Init()
     {
         int e = CudaNative.cuInit(0);
         if (e != 0) return Fail($"cuInit 失败：{CudaNative.Message(e)}");
 
-        e = CudaNative.cuDeviceGetCount(out int count);
-        if (e != 0 || count <= 0) return Fail("没有检测到 NVIDIA GPU");
+        // 优先把上下文建在 D3D9Ex 设备上：这样 kernel 结果可以直接写进 D3D9 纹理，
+        // 由 WPF 的 D3DImage 直接显示，不必回主机内存。失败则退回普通 CUDA 上下文。
+        int dev;
+        if (!TryCreateD3dContext(out dev))
+        {
+            e = CudaNative.cuDeviceGetCount(out int count);
+            if (e != 0 || count <= 0) return Fail("没有检测到 NVIDIA GPU");
 
-        e = CudaNative.cuDeviceGet(out int dev, 0);
-        if (e != 0) return Fail($"cuDeviceGet 失败：{CudaNative.Message(e)}");
+            e = CudaNative.cuDeviceGet(out dev, 0);
+            if (e != 0) return Fail($"cuDeviceGet 失败：{CudaNative.Message(e)}");
+
+            e = CudaNative.cuCtxCreate(out _ctx, 0, dev);
+            if (e != 0) return Fail($"创建 CUDA 上下文失败：{CudaNative.Message(e)}");
+        }
 
         IntPtr nm = Marshal.AllocHGlobal(256);
         CudaNative.cuDeviceGetName(nm, 256, dev);
@@ -201,9 +326,6 @@ public static class GpuAccel
         CudaNative.cuDeviceGetAttribute(out int ccMin, 76, dev);
         CudaNative.cuDeviceGetAttribute(out int sms, 16, dev);
         CudaNative.cuDriverGetVersion(out int ver);
-
-        e = CudaNative.cuCtxCreate(out _ctx, 0, dev);
-        if (e != 0) return Fail($"创建 CUDA 上下文失败：{CudaNative.Message(e)}");
 
         string ptx = LoadPtx();
         if (ptx.Length == 0) return Fail("找不到 Kernels/pikan.ptx");
@@ -549,47 +671,14 @@ public static class GpuAccel
             if (!Prepare()) return false;
             try
             {
-                ulong nout = (ulong)dst.LongLength;
-                IntPtr inPtr = devSrc;
-
-                if (inPtr == IntPtr.Zero)
-                {
-                    // 源在主机内存：走原来的「上传 → 算 → 回传」
-                    if (src is null) return false;
-                    ulong nin = (ulong)src.LongLength;
-                    if (!EnsureBuf(ref _bufA, ref _capA, nin)) return false;
-                    inPtr = _bufA;
-
-                    GCHandle hi = GCHandle.Alloc(src, GCHandleType.Pinned);
-                    try
-                    {
-                        if (CudaNative.cuMemcpyHtoD(_bufA, hi.AddrOfPinnedObject(), nin) != 0) return false;
-                    }
-                    finally
-                    {
-                        hi.Free();
-                    }
-                }
-
-                if (!EnsureBuf(ref _bufB, ref _capB, nout)) return false;
+                if (!PrepareSrc(src, devSrc, out IntPtr inPtr)) return false;
+                if (!EnsureBuf(ref _bufB, ref _capB, (ulong)dst.LongLength)) return false;
 
                 GCHandle ho = GCHandle.Alloc(dst, GCHandleType.Pinned);
                 try
                 {
-                    SetSlot(0, (ulong)inPtr);
-                    SetSlot(1, (ulong)_bufB);
-                    SetSlot(2, (uint)iw);
-                    SetSlot(3, (uint)ih);
-                    SetSlot(4, (uint)ow);
-                    SetSlot(5, (uint)oh);
-
-                    if (!Launch(highQuality ? _fnMitchell : _fnBilinear,
-                                (uint)((ow + 15) / 16), (uint)((oh + 15) / 16), 16, 16))
-                    {
-                        return false;
-                    }
-
-                    return CudaNative.cuMemcpyDtoH(ho.AddrOfPinnedObject(), _bufB, nout) == 0;
+                    return LaunchResize(inPtr, iw, ih, ow, oh, highQuality) &&
+                           CudaNative.cuMemcpyDtoH(ho.AddrOfPinnedObject(), _bufB, (ulong)dst.LongLength) == 0;
                 }
                 finally
                 {
@@ -600,6 +689,253 @@ public static class GpuAccel
             {
                 Done();
             }
+        }
+    }
+
+    /// <summary>
+    /// 重采样到已注册的 D3D9 纹理：算完只在设备内拷一次，
+    /// 不回主机内存、不重建 BitmapSource，WPF 直接拿纹理上屏。
+    /// </summary>
+    public static bool ResizeToTexture(byte[]? src, IntPtr devSrc, int iw, int ih,
+                                       IntPtr res, int ow, int oh, bool highQuality = true)
+    {
+        if (!_d3dCtx || res == IntPtr.Zero || iw <= 0 || ih <= 0 || ow <= 0 || oh <= 0)
+        {
+            return false;
+        }
+
+        lock (Gate)
+        {
+            if (!Prepare()) return false;
+            try
+            {
+                if (!PrepareSrc(src, devSrc, out IntPtr inPtr)) return false;
+                if (!EnsureBuf(ref _bufB, ref _capB, (ulong)ow * (ulong)oh * 4)) return false;
+                return LaunchResize(inPtr, iw, ih, ow, oh, highQuality) &&
+                       CopyToTextureCore(res, _bufB, ow, oh);
+            }
+            finally
+            {
+                Done();
+            }
+        }
+    }
+
+    /// <summary>
+    /// 重采样，但结果留在设备缓冲里不回主机。
+    /// 之后由 UI 线程用 CopyResultTo 直接落进 WriteableBitmap 的后备内存，
+    /// 于是省掉「中间 byte[] + BitmapSource.Create 再拷一遍」这两道。
+    /// </summary>
+    public static bool ResizeToDevice(byte[]? src, IntPtr devSrc, int iw, int ih, int ow, int oh, bool highQuality = true)
+    {
+        if (iw <= 0 || ih <= 0 || ow <= 0 || oh <= 0) return false;
+
+        lock (Gate)
+        {
+            if (!Prepare()) return false;
+            try
+            {
+                if (!PrepareSrc(src, devSrc, out IntPtr inPtr)) return false;
+                if (!EnsureBuf(ref _bufB, ref _capB, (ulong)ow * (ulong)oh * 4)) return false;
+                return LaunchResize(inPtr, iw, ih, ow, oh, highQuality);
+            }
+            finally
+            {
+                Done();
+            }
+        }
+    }
+
+    /// <summary>
+    /// 把上一次 ResizeToDevice 的结果拷到指定的主机地址。
+    /// dst 通常是 WriteableBitmap 的 BackBuffer——写入即上屏，不再有中间数组。
+    /// </summary>
+    public static bool CopyResultTo(IntPtr dst, ulong bytes)
+    {
+        if (dst == IntPtr.Zero || bytes == 0 || _bufB == IntPtr.Zero) return false;
+
+        lock (Gate)
+        {
+            if (!Prepare()) return false;
+            try
+            {
+                return CudaNative.cuMemcpyDtoH(dst, _bufB, bytes) == 0;
+            }
+            finally
+            {
+                Done();
+            }
+        }
+    }
+
+    /// <summary>源要么已在显存，要么从主机上传一次；返回设备指针。</summary>
+    private static bool PrepareSrc(byte[]? src, IntPtr devSrc, out IntPtr inPtr)
+    {
+        inPtr = devSrc;
+        if (inPtr != IntPtr.Zero)
+        {
+            return true;
+        }
+
+        if (src is null)
+        {
+            return false;
+        }
+
+        ulong nin = (ulong)src.LongLength;
+        if (!EnsureBuf(ref _bufA, ref _capA, nin)) return false;
+
+        GCHandle hi = GCHandle.Alloc(src, GCHandleType.Pinned);
+        try
+        {
+            if (CudaNative.cuMemcpyHtoD(_bufA, hi.AddrOfPinnedObject(), nin) != 0) return false;
+        }
+        finally
+        {
+            hi.Free();
+        }
+
+        inPtr = _bufA;
+        return true;
+    }
+
+    private static bool LaunchResize(IntPtr inPtr, int iw, int ih, int ow, int oh, bool highQuality)
+    {
+        SetSlot(0, (ulong)inPtr);
+        SetSlot(1, (ulong)_bufB);
+        SetSlot(2, (uint)iw);
+        SetSlot(3, (uint)ih);
+        SetSlot(4, (uint)ow);
+        SetSlot(5, (uint)oh);
+
+        return Launch(highQuality ? _fnMitchell : _fnBilinear,
+                      (uint)((ow + 15) / 16), (uint)((oh + 15) / 16), 16, 16);
+    }
+
+    // ==================================================================
+    // D3D9 纹理的注册 / 写入
+    // ==================================================================
+
+    /// <summary>把 D3D9 纹理登记给 CUDA。之后就能往里直接写了。</summary>
+    public static bool RegisterTexture(IntPtr tex, out IntPtr res)
+    {
+        res = IntPtr.Zero;
+        if (!_d3dCtx || tex == IntPtr.Zero) return false;
+
+        lock (Gate)
+        {
+            if (!Prepare()) return false;
+            try
+            {
+                int e = CudaNative.cuGraphicsD3D9RegisterResource(out IntPtr r, tex, 0);
+                if (e != 0 || r == IntPtr.Zero)
+                {
+                    Log($"d3d: 注册纹理失败 {CudaNative.Message(e)}");
+                    return false;
+                }
+
+                res = r;
+                return true;
+            }
+            finally
+            {
+                Done();
+            }
+        }
+    }
+
+    public static void UnregisterTexture(IntPtr res)
+    {
+        if (!_d3dCtx || res == IntPtr.Zero) return;
+
+        lock (Gate)
+        {
+            if (!Prepare()) return;
+            try
+            {
+                CudaNative.cuGraphicsUnregisterResource(res);
+            }
+            finally
+            {
+                Done();
+            }
+        }
+    }
+
+    /// <summary>
+    /// 设备缓冲 → 纹理。整段都在显存里完成，主机内存完全不参与。
+    /// 纹理必须先用 RegisterTexture 登记过。
+    /// </summary>
+    public static bool CopyToTexture(IntPtr res, IntPtr devSrc, int w, int h)
+    {
+        if (!_d3dCtx || res == IntPtr.Zero || devSrc == IntPtr.Zero) return false;
+
+        lock (Gate)
+        {
+            if (!Prepare()) return false;
+            try
+            {
+                return CopyToTextureCore(res, devSrc, w, h);
+            }
+            finally
+            {
+                Done();
+            }
+        }
+    }
+
+    private static bool CopyToTextureCore(IntPtr res, IntPtr devSrc, int w, int h)
+    {
+        IntPtr box = Marshal.AllocHGlobal(IntPtr.Size);
+        try
+        {
+            Marshal.WriteIntPtr(box, res);
+
+            int e = CudaNative.cuGraphicsMapResources(1, box, IntPtr.Zero);
+            if (e != 0)
+            {
+                Log($"d3d: 映射纹理失败 {CudaNative.Message(e)}");
+                return false;
+            }
+
+            bool ok = false;
+            try
+            {
+                e = CudaNative.cuGraphicsSubResourceGetMappedArray(out IntPtr arr, res, 0, 0);
+                if (e != 0 || arr == IntPtr.Zero)
+                {
+                    Log($"d3d: 取映射数组失败 {CudaNative.Message(e)}");
+                    return false;
+                }
+
+                CudaNative.Memcpy2D cp = new()
+                {
+                    SrcMemoryType = 2,                 // CU_MEMORYTYPE_DEVICE
+                    SrcDevice = (ulong)devSrc,
+                    SrcPitch = (ulong)(w * 4),
+                    DstMemoryType = 3,                 // CU_MEMORYTYPE_ARRAY
+                    DstArray = arr,
+                    WidthInBytes = (ulong)(w * 4),
+                    Height = (ulong)h,
+                };
+
+                e = CudaNative.cuMemcpy2D(ref cp);
+                ok = e == 0;
+                if (!ok)
+                {
+                    Log($"d3d: 写纹理失败 {CudaNative.Message(e)}");
+                }
+            }
+            finally
+            {
+                CudaNative.cuGraphicsUnmapResources(1, box, IntPtr.Zero);
+            }
+
+            return ok;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(box);
         }
     }
 

@@ -179,22 +179,16 @@ public static class GpuResampler
             return src;
         }
 
-        string key = $"{path}|{src.PixelWidth}x{src.PixelHeight}|{ow}x{oh}";
-        LastFrom = "";
-
         if (ResultCacheEnabled)
         {
-            lock (ResultGate)
+            BitmapSource? cached = TryResult(path, src, ow, oh);
+            if (cached is not null)
             {
-                if (ResultMap.TryGetValue(key, out LinkedListNode<KeyValuePair<string, BitmapSource>>? node))
-                {
-                    ResultLru.Remove(node);
-                    ResultLru.AddLast(node);
-                    LastFrom = "结果缓存";   // ② 零计算
-                    return node.Value.Value;
-                }
+                return cached;
             }
         }
+
+        LastFrom = "";
 
         BitmapSource? made = null;
 
@@ -236,6 +230,7 @@ public static class GpuResampler
 
         if (made is not null && ResultCacheEnabled)
         {
+            string key = $"{path}|{src.PixelWidth}x{src.PixelHeight}|{ow}x{oh}";
             lock (ResultGate)
             {
                 LinkedListNode<KeyValuePair<string, BitmapSource>> node =
@@ -252,6 +247,75 @@ public static class GpuResampler
         }
 
         return made;
+    }
+
+    /// <summary>
+    /// 查结果缓存：同一张图 + 同一目标尺寸，直接把上次算好的位图拿出来，连 kernel 都不跑。
+    /// 命中返回位图，未命中返回 null。
+    /// </summary>
+    public static BitmapSource? TryResult(string path, BitmapSource src, int ow, int oh)
+    {
+        if (!ResultCacheEnabled)
+        {
+            return null;
+        }
+
+        string key = $"{path}|{src.PixelWidth}x{src.PixelHeight}|{ow}x{oh}";
+        lock (ResultGate)
+        {
+            if (ResultMap.TryGetValue(key, out LinkedListNode<KeyValuePair<string, BitmapSource>>? node))
+            {
+                ResultLru.Remove(node);
+                ResultLru.AddLast(node);
+                LastFrom = "结果缓存";   // 零计算
+                return node.Value.Value;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 只算不回读：结果留在显存里，随后由 UI 线程写进复用的 WriteableBitmap。
+    /// 省掉「中间 byte[] + BitmapSource.Create 再拷一遍」这两道。
+    /// 尺寸恰好一致时不必重采样，返回 false。
+    /// </summary>
+    public static bool ResizeToDevice(string path, BitmapSource src, int ow, int oh, int edge)
+    {
+        if (ow <= 0 || oh <= 0 || !GpuActive)
+        {
+            return false;
+        }
+
+        if (src.PixelWidth == ow && src.PixelHeight == oh)
+        {
+            return false;   // 已经是 1:1，无需重采样
+        }
+
+        // ① 源已在显存 —— 连上传都省了
+        if (GpuImageCache.Instance.TryGet(path, edge, out IntPtr dev, out int iw, out int ih))
+        {
+            LastFrom = "显存命中";
+            return GpuAccel.ResizeToDevice(null, dev, iw, ih, ow, oh);
+        }
+
+        // ② 首次：传进显存后照常算（传进去的这份会常驻，下次就走 ①）
+        if (GpuImageCache.Instance.Put(path, src, edge) &&
+            GpuImageCache.Instance.TryGet(path, edge, out IntPtr d2, out int iw2, out int ih2))
+        {
+            LastFrom = "上传后算";
+            return GpuAccel.ResizeToDevice(null, d2, iw2, ih2, ow, oh);
+        }
+
+        // ③ 常规：从主机上传
+        byte[]? inBuf = Pixels(src);
+        if (inBuf is null)
+        {
+            return false;
+        }
+
+        LastFrom = "常规上传";
+        return GpuAccel.ResizeToDevice(inBuf, IntPtr.Zero, src.PixelWidth, src.PixelHeight, ow, oh);
     }
 
     private static BitmapSource? FromDevice(IntPtr dev, int iw, int ih, int ow, int oh)
