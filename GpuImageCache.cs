@@ -35,6 +35,19 @@ public sealed class GpuImageCache
     /// <summary>总开关：关掉后不再往显存放图（--novram，用于 A/B 对比收益）。</summary>
     public static bool Enabled { get; set; } = true;
 
+    /// <summary>
+    /// 显存缓存最多能吃掉总显存的比例，默认 50%（--vram=N 覆盖，N 是百分比）。
+    /// 翻过的图继续留在显存里，往回翻就是零成本；一直往前翻则由 LRU 挤掉最旧的。
+    /// </summary>
+    public static double Ratio { get; set; } = 0.5;
+
+    /// <summary>
+    /// 紧跟随窗口（--tightvram）：翻页时立刻释放窗口外的图。
+    /// 默认关——那样缓存大小恒等于窗口大小（41 张 / 258MB），配额给到 50% 也用不上。
+    /// 只作 A/B 对照用。
+    /// </summary>
+    public static bool TightWindow { get; set; }
+
     private readonly object _gate = new();
 
     // 头 = 最旧，尾 = 最近用过
@@ -44,6 +57,7 @@ public sealed class GpuImageCache
 
     private long _bytes;
     private long _maxBytes;
+    private long _maxStamp = long.MinValue;
 
     public static readonly GpuImageCache Instance = new();
 
@@ -53,17 +67,45 @@ public sealed class GpuImageCache
     {
         get
         {
-            if (_maxBytes > 0)
+            // GPU 还没就绪时绝不查显存：TotalMemBytes 会走 Ensure() 触发 CUDA 初始化，
+            // 在 UI 线程上就是 1~2 秒的冻结。用上次算过的值顶着，没有就先给个小的。
+            if (!GpuResampler.GpuReady)
+            {
+                return _maxBytes > 0 ? _maxBytes : 192L * 1024 * 1024;
+            }
+
+            // 配额不一次性定死：浏览器、游戏随时在吃显存，
+            // 隔一小段重算一次，才能既用满又不跟别人抢。
+            long now = Environment.TickCount64;
+            if (_maxBytes > 0 && now - _maxStamp < 500)
             {
                 return _maxBytes;
             }
 
-            // 配额按显卡显存取 1/8，夹在 192MB–768MB：
-            // 41 张满档（1536 长边）约 258MB，够放下整个预载窗口且留有余量，
-            // 又不至于和显示、系统其他程序抢显存。
+            _maxStamp = now;
+
             ulong total = GpuAccel.TotalMemBytes;
-            long want = total > 0 ? (long)(total / 8) : 256L * 1024 * 1024;
-            _maxBytes = Math.Clamp(want, 192L * 1024 * 1024, 768L * 1024 * 1024);
+            if (total == 0)
+            {
+                _maxBytes = 256L * 1024 * 1024;
+                return _maxBytes;
+            }
+
+            long want = (long)(total * Math.Clamp(Ratio, 0.05, 0.8));
+            long ceiling = (long)(total * 0.8);
+
+            // 给系统和其他程序留 1GB 安全垫：空闲不够就往回收。
+            // 否则把显存吃光会让 CUDA 分配失败，整条加速路径反而回落。
+            ulong free = GpuAccel.FreeMemBytes;
+            if (free > 0)
+            {
+                long others = (long)total - (long)free - _bytes;   // 别人占的
+                want = Math.Min(want, ceiling - others);
+            }
+
+            // 下限 256MB ≈ 一个满档预载窗口（41 张 / 233MB）。低于这个数窗口里的图
+            // 就会被 LRU 挤掉，翻回去还得重新上传，反而更卡 —— 显存再紧也先保住窗口。
+            _maxBytes = Math.Clamp(want, 256L * 1024 * 1024, ceiling);
             return _maxBytes;
         }
     }
@@ -76,6 +118,12 @@ public sealed class GpuImageCache
     public long Bytes
     {
         get { lock (_gate) { return _bytes; } }
+    }
+
+    /// <summary>当前显存配额（MB）。会随空闲显存变化，仅供状态栏 / bench 展示。</summary>
+    public long QuotaMb
+    {
+        get { return MaxBytes / (1024 * 1024); }
     }
 
     /// <summary>

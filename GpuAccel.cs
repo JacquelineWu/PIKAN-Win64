@@ -140,6 +140,7 @@ internal static class CudaNative
     [DllImport(Lib)] internal static extern int cuDeviceGetName(IntPtr name, int len, int dev);
     [DllImport(Lib)] internal static extern int cuDeviceTotalMem_v2(out ulong bytes, int dev);
     [DllImport(Lib)] internal static extern int cuDeviceGetAttribute(out int value, int attrib, int dev);
+    [DllImport(Lib)] internal static extern int cuMemGetInfo_v2(out ulong free, out ulong total);
 
     [DllImport(Lib, EntryPoint = "cuCtxCreate_v2")] internal static extern int cuCtxCreate(out IntPtr ctx, uint flags, int dev);
     [DllImport(Lib, EntryPoint = "cuCtxDestroy_v2")] internal static extern int cuCtxDestroy(IntPtr ctx);
@@ -310,6 +311,19 @@ public static class GpuAccel
     public static ulong TotalMemBytes
     {
         get { Ensure(); return _totalMem; }
+    }
+
+    /// <summary>
+    /// 当前空闲显存（字节），查询失败返回 0。
+    /// 配额靠它留出安全余量——浏览器、游戏随时会吃显存，只看总显存会跟它们抢。
+    /// </summary>
+    public static ulong FreeMemBytes
+    {
+        get
+        {
+            Ensure();
+            return CudaNative.cuMemGetInfo_v2(out ulong free, out _) == 0 ? free : 0;
+        }
     }
 
     /// <summary>"CUDA" 或 "CPU"。</summary>
@@ -923,6 +937,15 @@ public static class GpuAccel
 
         return ok;
     }
+
+    /// <summary>显存缓存的累计计数（上传次数 / 命中次数），bench 收尾汇总用。</summary>
+    public static string VramStats => $"上传 {_devPut} 次 · 命中 {_devHit} 次";
+
+    /// <summary>
+    /// 记一次显存命中。三条出口（回主机内存 / 留显存 / 写纹理）都要记，
+    /// 否则零拷贝路径的命中会被漏掉，看起来像缓存没生效。
+    /// </summary>
+    public static void NoteHit() => _devHit++;
 
     /// <summary>记一次「上传入显存」；用于确认预载确实把图放进去了（限流）。</summary>
     public static void NoteUpload(int w, int h, long bytes)

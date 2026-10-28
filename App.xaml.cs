@@ -40,6 +40,23 @@ public partial class App : Application
                 GpuImageCache.Enabled = false;
                 GpuResampler.ResultCacheEnabled = false;
             }
+            else if (a.StartsWith("--vram=", StringComparison.OrdinalIgnoreCase))
+            {
+                // 显存缓存最多吃掉总显存的百分比，默认 50。
+                // 例：--vram=25 保守些，留给别的程序；--vram=80 激进占用。
+                if (double.TryParse(a["--vram=".Length..],
+                                    System.Globalization.NumberStyles.Float,
+                                    System.Globalization.CultureInfo.InvariantCulture,
+                                    out double pct))
+                {
+                    GpuImageCache.Ratio = Math.Clamp(pct, 5, 80) / 100.0;
+                }
+            }
+            else if (string.Equals(a, "--tightvram", StringComparison.OrdinalIgnoreCase))
+            {
+                // A/B 对照用：显存缓存紧跟随窗口，离开窗口立刻释放（旧行为）
+                GpuImageCache.TightWindow = true;
+            }
             else if (string.Equals(a, "--noavx", StringComparison.OrdinalIgnoreCase))
             {
                 // A/B 对照用：关掉 CPU 的 AVX2 Mitchell，回落到 WIC 双线性

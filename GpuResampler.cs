@@ -217,6 +217,7 @@ public static class GpuResampler
         {
             if (GpuImageCache.Instance.TryGet(path, edge, out IntPtr dev, out int iw, out int ih))
             {
+                GpuAccel.NoteHit();
                 made = FromDevice(dev, iw, ih, ow, oh);   // ① 源已在显存
                 LastFrom = made is not null ? "显存命中" : "显存命中但失败";
             }
@@ -325,6 +326,7 @@ public static class GpuResampler
         // ① 源已在显存 —— 连上传都省了
         if (GpuImageCache.Instance.TryGet(path, edge, out IntPtr dev, out int iw, out int ih))
         {
+            GpuAccel.NoteHit();
             LastFrom = "显存命中";
             return GpuAccel.ResizeToDevice(null, dev, iw, ih, ow, oh);
         }
@@ -368,6 +370,7 @@ public static class GpuResampler
         // ① 源已在显存 —— 连上传都省了
         if (GpuImageCache.Instance.TryGet(path, edge, out IntPtr dev, out int iw, out int ih))
         {
+            GpuAccel.NoteHit();
             LastFrom = "显存命中";
             return GpuAccel.ResizeToTexture(null, dev, iw, ih, res, ow, oh);
         }

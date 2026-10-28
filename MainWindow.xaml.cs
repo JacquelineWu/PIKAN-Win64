@@ -265,7 +265,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         long bytes = GpuImageCache.Instance.Bytes;
         int n = GpuImageCache.Instance.Count;
-        return n > 0 ? $" · 显存 {n} 张 {ImageItem.FormatBytes(bytes)}" : "";
+        if (n <= 0)
+        {
+            return "";
+        }
+
+        // 配额随空闲显存浮动，一并显示出来，便于判断缓存到底用起来没有
+        long quota = GpuImageCache.Instance.QuotaMb;
+        string cap = quota > 0 ? $" / {quota / 1024.0:F1} GB" : "";
+        return $" · 显存 {n} 张 {ImageItem.FormatBytes(bytes)}{cap}";
     }
 
     /// <summary>
@@ -1329,7 +1337,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         _previews.EvictOutside(_items, _cur, PreloadBack, PreloadFwd, MainImage.Source, LowImage.Source);
-        GpuImageCache.Instance.EvictOutside(WindowPaths());
+
+        // 显存缓存不跟着窗口立刻释放：那样缓存大小恒等于窗口大小（41 张 / 258MB），
+        // 配额给到 50% 也用不上。改由配额 + LRU 兜底（见 GpuImageCache.Put）：
+        // 翻过的图继续留着，往回翻零成本；一直往前翻则挤掉最旧的，总量不会失控。
+        // --tightvram 可回到旧的紧跟随行为，用于对比收益。
+        if (GpuImageCache.TightWindow)
+        {
+            GpuImageCache.Instance.EvictOutside(WindowPaths());
+        }
+
         NotifyCache();
         _preloadSeq++;
         if (_preloadBusy)
@@ -2108,6 +2125,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         await Task.Delay(5000); // 等最后一次全清 / 精修落定
+
+        Perf.Note($"==== 显存缓存：{GpuImageCache.Instance.Count} 张 · " +
+                  $"{GpuImageCache.Instance.Bytes / (1024 * 1024)} MB / 配额 " +
+                  $"{GpuImageCache.Instance.QuotaMb} MB（总显存 " +
+                  $"{GpuAccel.TotalMemBytes / (1024 * 1024)} MB · 上限 " +
+                  $"{GpuImageCache.Ratio * 100:0}%）· {GpuAccel.VramStats} ====");
         Perf.Note("==== bench 结束 ====");
         Perf.FlushSync();
         await Task.Delay(800);
