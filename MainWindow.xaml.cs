@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Globalization;
 using System.Threading;
 using System.Diagnostics;
 using System.IO;
@@ -44,7 +45,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 {
     // ---- 视图变换 ----
     private const double MinScale = 0.05;
-    private const double MaxScale = 16.0;
+
+    // 上限按「相对适应窗口的倍数」算。竖幅高像素图（如 4672×7008）按长边适应时
+    // 缩放比很小，1:1 就要 7.84 倍；16 倍只能放到原图的 ~200%，看细节不够。
+    // 放到 32 倍可覆盖到 ~400%（此刻 target 已远超位图，精修会跳过，不会多分配内存）。
+    private const double MaxScale = 32.0;
 
     // ---- 鼠标键缩放：左键 ×1.5，右键 ×2.0 ----
     private const double ZoomLeft = 1.5;
@@ -252,7 +257,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         set { _resumeHint = value; OnPropertyChanged(nameof(ResumeHint)); OnPropertyChanged(nameof(ResumeHintVisibility)); }
     }
 
-    public string ZoomText => Math.Round(_zoom * 100) + " %";
+    public string ZoomText
+    {
+        get
+        {
+            double pct = PixelZoom() * 100;
+
+            // 小到 <10% 时给一位小数，否则整百分数会长时间卡在同一个数上
+            return (pct < 10 ? pct.ToString("F1", CultureInfo.InvariantCulture)
+                             : Math.Round(pct).ToString(CultureInfo.InvariantCulture)) + " %";
+        }
+    }
 
     public string InfoLine
     {
@@ -737,6 +752,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private double FrameH => _rot % 180 != 0 ? CanvasArea.ActualWidth : CanvasArea.ActualHeight;
 
+    /// <summary>一个 WPF 逻辑像素（DIP）对应几个物理屏幕像素。</summary>
+    private double DpiFactor => Math.Max(1.0, VisualTreeHelper.GetDpi(this).DpiScaleX);
+
     /// <summary>Stretch=Uniform 时图片相对可用框的缩放比。</summary>
     private double FitFactor()
     {
@@ -746,6 +764,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         return Math.Min(FrameW / _imgW, FrameH / _imgH);
+    }
+
+    /// <summary>
+    /// **相对原图像素的**显示倍率：1 表示「一个图片像素 = 一个屏幕物理像素」（即 1:1 / 100%）。
+    ///
+    /// 注意 <c>_zoom</c> 是相对「适应窗口」的倍数（<see cref="ResetView"/> 把它设为 1），
+    /// 只在内部用；界面上给用户看的百分比必须是这个——适应窗口通常是 20% 上下而非 100%，
+    /// 这也才符合 ACDSee / Photoshop 的习惯。
+    ///
+    /// 推导：图片按 Uniform 适应后宽 = <c>_imgW × f</c> 个 DIP，再乘 _zoom，
+    /// 再乘 DPI 得到物理像素数，除以原图宽即为倍率（与高矮无关，故取长边同解）。
+    /// </summary>
+    private double PixelZoom()
+    {
+        double f = FitFactor();
+        return f <= 0 ? _zoom : f * _zoom * DpiFactor;
     }
 
     /// <summary>
@@ -795,7 +829,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         UpdateTransform();
         RefreshImageInfo();
         ScheduleRefine();
-        Status = $"缩放 {Math.Round(_zoom * 100)}%";
+        Status = $"缩放 {ZoomText}";
     }
 
     /// <summary>
@@ -809,7 +843,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         double next = Clamp(old * factor, MinScale, MaxScale);
         if (Math.Abs(next - old) < 1e-9)
         {
-            Status = $"已达缩放极限 {Math.Round(old * 100)}%";
+            Status = $"已达缩放极限 {ZoomText}";
             return;
         }
 
@@ -832,7 +866,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         UpdateTransform();
         RefreshImageInfo();
         ScheduleRefine();
-        Status = $"缩放 {Math.Round(_zoom * 100)}%";
+        Status = $"缩放 {ZoomText}";
     }
 
     /// <summary>1:1 —— 一个图片像素对应一个屏幕像素。</summary>
@@ -849,11 +883,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        _zoom = Clamp(1 / f, MinScale, MaxScale);
+        // 乘 DPI 是关键：_zoom 作用在 DIP 上，而 1:1 指「一个图片像素 = 一个物理像素」。
+        // 漏掉这一项时，125% 缩放下按 F 得到的其实是 125%（虚胖），且屏幕需求算出
+        // 比原图更多的像素，永远解码不到、只能靠 WPF 拉。
+        _zoom = Clamp(1 / (f * DpiFactor), MinScale, MaxScale);
         UpdateTransform();
         RefreshImageInfo();
         ScheduleRefine();
-        Status = $"1:1 原始像素（{_imgW} × {_imgH}）";
+        Status = $"1:1 原始像素（{_imgW} × {_imgH}）· {ZoomText}";
     }
 
     private void RotateBy(int delta)
@@ -959,8 +996,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private int NeededEdge()
     {
         double baseEdge = Math.Max(FrameW, FrameH);
-        double dpi = Math.Max(1.0, VisualTreeHelper.GetDpi(this).DpiScaleX);
-        return (int)Math.Ceiling(baseEdge * dpi * _zoom * 1.05);
+        return (int)Math.Ceiling(baseEdge * DpiFactor * _zoom * 1.05);
     }
 
     /// <summary>
@@ -1388,7 +1424,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return (0, 0);
         }
 
-        double dpi = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        double dpi = DpiFactor;
         int w = (int)Math.Round(img.Width * f * _zoom * dpi);
         int h = (int)Math.Round(img.Height * f * _zoom * dpi);
         return (Math.Max(1, w), Math.Max(1, h));
@@ -2300,6 +2336,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         FlushPos();
     }
 
+    /// <summary>
+    /// 拖到另一块不同缩放比的显示器时，同一个 _zoom 对应的物理像素数就变了。
+    /// 这里保持显示的物理大小（_zoom 不动），只把百分比重新算一遍。
+    /// </summary>
+    private void Window_DpiChanged(object sender, System.Windows.DpiChangedEventArgs e)
+    {
+        RefreshImageInfo();
+        ScheduleRefine();
+    }
+
     private void ActGpu(object sender, RoutedEventArgs e) => ToggleGpu();
 
     /// <summary>切换 GPU / CPU 渲染路径，便于直接对比画质与流畅度。</summary>
@@ -2478,12 +2524,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await Dispatcher.InvokeAsync(() => OpenPath(path));
         await Task.Delay(4000); // 等载入、精修到位
 
+        // 档位按「相对原图像素的倍率」给（即界面上显示的百分比），不再是内部的 _zoom
+        // （_zoom 是相对「适应窗口」的倍数，会随窗口大小浮动，不直观）
+        double perZoom = Math.Max(1e-9, FitFactor() * DpiFactor); //  1 单位 _zoom 等于多少倍像素
         (string Name, Func<double> Zoom)[] steps =
         {
             ("适应", () => 1.0),
-            ("200%", () => 2.0),
-            ("400%", () => 4.0),
-            ("1:1", () => 1.0 / Math.Max(1e-9, FitFactor()))
+            ("25%", () => 0.25 / perZoom),
+            ("100%", () => 1.0 / perZoom),
+            ("200%", () => 2.0 / perZoom),
+            ("400%", () => 4.0 / perZoom)
         };
 
         foreach ((string name, Func<double> zoom) in steps)
@@ -2527,9 +2577,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
                 double ratio = bw > 0 ? Math.Max(tw / (double)bw, th / (double)bh) : 0;
 
-                GpuAccel.WriteLog($"zoomtest {name}: zoom={_zoom:F2}  屏幕需 {tw}x{th}  " +
-                                  $"位图 {bw}x{bh}（档 {_viewOwned.Edge}）  原图 {_viewOwned.Width}x{_viewOwned.Height}  " +
-                                  $"拉伸比 {ratio:F2}{(ratio > 1.02 ? "  ← 不够，会糊" : "  ✓ 够用")}");
+                // 顺序再往下就两回事了：需求还没到位图档（真・不够，糊）vs
+                // 位图已是原图全像素（超过 100% 之后必然如此，没有更多像素可取，
+                // 再往上的放大只能插值，不算缺陷）
+                bool atNative = _viewOwned.Width > 0 && bw >= _viewOwned.Width;
+                string verdict = ratio <= 1.02 ? "  ✓ 够用"
+                               : atNative ? "  · 已到原图像素上限，再放大靠插值"
+                               : "  ← 不够，会糊";
+
+                GpuAccel.WriteLog($"zoomtest {name}: 显示 {ZoomText}  zoom={_zoom:F2}  " +
+                                  $"屏幕需 {tw}x{th}  位图 {bw}x{bh}（档 {_viewOwned.Edge}）  " +
+                                  $"原图 {_viewOwned.Width}x{_viewOwned.Height}  " +
+                                  $"拉伸比 {ratio:F2}{verdict}");
             });
         }
 

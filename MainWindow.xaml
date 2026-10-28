@@ -12,7 +12,8 @@
         PreviewKeyDown="Window_PreviewKeyDown"
         Closing="Window_Closing"
         Drop="Window_Drop"
-        DragOver="Window_DragOver">
+        DragOver="Window_DragOver"
+        DpiChanged="Window_DpiChanged">
 
     <Grid SnapsToDevicePixels="True">
         <Grid.RowDefinitions>
