@@ -231,7 +231,7 @@
             <!-- ==== 右侧：大图预览 ==== -->
             <Grid x:Name="CanvasArea"
                   Grid.Column="1"
-                  Background="#0a0b0d"
+                  Background="#5F5F5F"
                   ClipToBounds="True"
                   SizeChanged="CanvasArea_SizeChanged"
                   MouseWheel="CanvasArea_MouseWheel"
