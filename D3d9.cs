@@ -40,62 +40,34 @@ internal static class D3d9
         return hr < 0 || d3d == IntPtr.Zero ? IntPtr.Zero : d3d;
     }
 
-    /// <summary>
-    /// 找到指定厂商的适配器序号（NVIDIA = 0x10DE），找不到返回 -1。
-    ///
-    /// 双显卡笔记本上 D3D9 的 0 号适配器往往是集成显卡，而 CUDA 只认 NVIDIA 独显，
-    /// 拿集显的 device 去建 CUDA 上下文会直接失败（实测报 unknown error）。
-    /// </summary>
-    public static int FindAdapter(IntPtr d3d, uint vendorId)
+    /// <summary>适配器个数。D3D9 对象无效时返回 0。</summary>
+    public static uint AdapterCount(IntPtr d3d)
     {
-        if (d3d == IntPtr.Zero)
-        {
-            return -1;
-        }
-
-        IntPtr fnCount = Vt(d3d, VtGetAdapterCount);
-        IntPtr fnIdent = Vt(d3d, VtGetAdapterIdentifier);
-        if (fnCount == IntPtr.Zero || fnIdent == IntPtr.Zero)
-        {
-            return -1;
-        }
-
-        uint n = Marshal.GetDelegateForFunctionPointer<GetAdapterCountFn>(fnCount)(d3d);
-        GetAdapterIdentifierFn ident = Marshal.GetDelegateForFunctionPointer<GetAdapterIdentifierFn>(fnIdent);
-
-        System.Text.StringBuilder sb = new();
-        sb.Append($"count={n}");
-        int found = -1;
-
-        for (uint i = 0; i < n && i < 8; i++)
-        {
-            AdapterIdentifier9 ai = new()
-            {
-                Driver = new byte[512],
-                Description = new byte[512],
-                DeviceName = new byte[32],
-            };
-
-            int hr = ident(d3d, i, 0, ref ai);
-            string desc = System.Text.Encoding.ASCII.GetString(ai.Description).TrimEnd('\0');
-            if (desc.Length > 40)
-            {
-                desc = desc[..40];
-            }
-
-            sb.Append($" | {i}: hr={hr} vendor=0x{ai.VendorId:X4} {desc}");
-            if (hr >= 0 && ai.VendorId == vendorId && found < 0)
-            {
-                found = (int)i;
-            }
-        }
-
-        LastDiag = sb.ToString();
-        return found;
+        IntPtr fn = d3d == IntPtr.Zero ? IntPtr.Zero : Vt(d3d, VtGetAdapterCount);
+        return fn == IntPtr.Zero ? 0 : Marshal.GetDelegateForFunctionPointer<GetAdapterCountFn>(fn)(d3d);
     }
 
-    /// <summary>适配器枚举的诊断串（厂商、描述），排查双显卡问题时用。</summary>
-    public static string LastDiag { get; private set; } = "";
+    /// <summary>第 i 个适配器的厂商 ID（NVIDIA = 0x10DE，AMD = 0x1002）。取不到返回 0。</summary>
+    public static uint AdapterVendorId(IntPtr d3d, uint i)
+    {
+        IntPtr fn = d3d == IntPtr.Zero ? IntPtr.Zero : Vt(d3d, VtGetAdapterIdentifier);
+        if (fn == IntPtr.Zero)
+        {
+            return 0;
+        }
+
+        AdapterIdentifier9 ai = new()
+        {
+            Driver = new byte[512],
+            Description = new byte[512],
+            DeviceName = new byte[32],
+        };
+
+        return Marshal.GetDelegateForFunctionPointer<GetAdapterIdentifierFn>(fn)(d3d, i, 0, ref ai) < 0
+            ? 0
+            : ai.VendorId;
+    }
+
 
     /// <summary>
     /// 创建 D3D9Ex 设备。窗口用桌面窗口做焦点窗口即可——我们只是要一个能开纹理的
@@ -197,6 +169,17 @@ internal static class D3d9
         return hr < 0 ? IntPtr.Zero : surf;
     }
 
+    /// <summary>
+    /// 设备状态查询。返回 0（D3D_OK）表示可用；
+    /// D3DERR_DEVICELOST 表示彻底丢失要等底层恢复，DEVICENOTRESET 表示可以 Reset 了。
+    /// </summary>
+    public static int TestCooperativeLevel(IntPtr device)
+    {
+        IntPtr fn = device == IntPtr.Zero ? IntPtr.Zero : Vt(device, VtTestCooperativeLevel);
+        return fn == IntPtr.Zero ? unchecked((int)0x88760868)
+                                 : Marshal.GetDelegateForFunctionPointer<TestCooperativeLevelFn>(fn)(device);
+    }
+
     public static void Release(ref IntPtr obj)
     {
         if (obj == IntPtr.Zero)
@@ -223,6 +206,7 @@ internal static class D3d9
     private const int VtCreateDeviceEx = 20;   // IDirect3D9Ex
     private const int VtCreateTexture = 23;    // IDirect3DDevice9
     private const int VtGetSurfaceLevel = 18;  // IDirect3DTexture9
+    private const int VtTestCooperativeLevel = 3;  // IDirect3DDevice9
 
     private static IntPtr Vt(IntPtr obj, int index) =>
         Marshal.ReadIntPtr(Marshal.ReadIntPtr(obj) + index * IntPtr.Size);
@@ -284,4 +268,7 @@ internal static class D3d9
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate uint ReleaseFn(IntPtr self);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int TestCooperativeLevelFn(IntPtr self);
 }

@@ -61,6 +61,11 @@ public partial class App : Application
                 // 双显卡笔记本上 D3D9 只认集显，会自动回退）
                 GpuAccel.D3dEnabled = false;
             }
+            else if (string.Equals(a, "--nogpupref", StringComparison.OrdinalIgnoreCase))
+            {
+                // 不让程序自动在 Windows 图形首选项里申请独显（见 GpuAccel.RequestGpuPreference）
+                GpuAccel.GpuPrefEnabled = false;
+            }
             else if (string.Equals(a, "--noreuse", StringComparison.OrdinalIgnoreCase))
             {
                 // A/B 对照用：关掉复用位图，回到「每次新建 BitmapSource」的旧路径

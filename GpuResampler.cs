@@ -348,6 +348,49 @@ public static class GpuResampler
         return GpuAccel.ResizeToDevice(inBuf, IntPtr.Zero, src.PixelWidth, src.PixelHeight, ow, oh);
     }
 
+    /// <summary>
+    /// 零拷贝版：结果直接写进 D3D9 纹理，全程不回主机内存。
+    /// res 由 D3dView 提供（已登记给 CUDA 的那张纹理）。
+    /// 成功返回 true，调用方届时只需给 D3DImage 标一次脏区。
+    /// </summary>
+    public static bool ResizeToTexture(string path, BitmapSource src, IntPtr res, int ow, int oh, int edge)
+    {
+        if (ow <= 0 || oh <= 0 || res == IntPtr.Zero || !GpuActive)
+        {
+            return false;
+        }
+
+        if (src.PixelWidth == ow && src.PixelHeight == oh)
+        {
+            return false;   // 已经是 1:1，无需重采样
+        }
+
+        // ① 源已在显存 —— 连上传都省了
+        if (GpuImageCache.Instance.TryGet(path, edge, out IntPtr dev, out int iw, out int ih))
+        {
+            LastFrom = "显存命中";
+            return GpuAccel.ResizeToTexture(null, dev, iw, ih, res, ow, oh);
+        }
+
+        // ② 首次：传进显存后照常算（传进去的这份会常驻，下次就走 ①）
+        if (GpuImageCache.Instance.Put(path, src, edge) &&
+            GpuImageCache.Instance.TryGet(path, edge, out IntPtr d2, out int iw2, out int ih2))
+        {
+            LastFrom = "上传后算";
+            return GpuAccel.ResizeToTexture(null, d2, iw2, ih2, res, ow, oh);
+        }
+
+        // ③ 常规：从主机上传
+        byte[]? inBuf = Pixels(src);
+        if (inBuf is null)
+        {
+            return false;
+        }
+
+        LastFrom = "常规上传";
+        return GpuAccel.ResizeToTexture(inBuf, IntPtr.Zero, src.PixelWidth, src.PixelHeight, res, ow, oh);
+    }
+
     private static BitmapSource? FromDevice(IntPtr dev, int iw, int ih, int ow, int oh)
     {
         byte[] outBuf = new byte[ow * oh * 4];

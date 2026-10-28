@@ -1084,7 +1084,52 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 return;
             }
 
-            // ③ 后台算完留在显存，UI 线程再直接写进复用位图：
+            // ③ 零拷贝：kernel 结果直接写进 D3D9 纹理，WPF 拿这张纹理上屏。
+            //    相较于 ④，省掉的是「回读几 MB 到主机内存」这一趟；
+            //    相较于 ②（结果缓存），省的是主机内存里那份成品位图。
+            if (D3dView.Enabled)
+            {
+                ImageSource? d3d = D3dView.Instance.Prepare(w, h);
+                if (d3d is not null)
+                {
+                    IntPtr res = D3dView.Instance.Resource;
+                    bool wrote = false;
+                    try
+                    {
+                        Stopwatch sw3 = Stopwatch.StartNew();
+                        wrote = await Task.Run(() => GpuResampler.ResizeToTexture(
+                            src.Path, src.Source, res, w, h, src.Edge));
+                        Perf.Span($"  GPU 重采样[零拷贝][{GpuResampler.LastFrom}] " +
+                                  $"{src.Source.PixelWidth}x{src.Source.PixelHeight} → {w}x{h}",
+                                  sw3.ElapsedMilliseconds);
+                    }
+                    catch (Exception ex)
+                    {
+                        GpuDiagnose($"d3d refine 异常 {ex.GetType().Name}: {ex.Message}");
+                    }
+
+                    if (wrote && seq == _refineSeq && token == _curToken)
+                    {
+                        // 先给 Source（让 D3DImage 挂进视觉树），再标脏区，
+                        // 否则脏区打在没有宿主的对象上不触发任何拷贝。
+                        MainImage.Source = d3d;
+
+                        Stopwatch sw4 = Stopwatch.StartNew();
+                        bool shown = D3dView.Instance.Present(w, h);
+                        Perf.Span("  D3DImage 上屏（标记脏区）", sw4.ElapsedMilliseconds);
+
+                        if (shown)
+                        {
+                            Perf.Tick("精修上屏[零拷贝]");
+                            return;
+                        }
+
+                        GpuDiagnose("D3DImage 标记脏区失败，回落位图路径");
+                    }
+                }
+            }
+
+            // ④ 后台算完留在显存，UI 线程再直接写进复用位图：
             //    没有中间数组、没有新位图，尺寸不变时 WPF 也不必重建纹理。
             bool computed;
             try
@@ -1117,7 +1162,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
         }
 
-        // ④ 兜底：原来的「新建位图」路径（--noreuse 或复用失败时走这里）
+        // ⑤ 兜底：原来的「新建位图」路径（--noreuse 或前面的零拷贝都没成功）
         BitmapSource? refined;
         try
         {

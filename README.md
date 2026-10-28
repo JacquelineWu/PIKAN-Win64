@@ -86,45 +86,33 @@
 
 即：再来回翻同一批图，重采样基本不花钱（结果命中 0 ms）。
 
-### 上屏：算完直接写进复用位图
+### 上屏：零拷贝直通（D3DImage），复用位图兜底
 
-重采样快了还不够——**把结果搬到屏幕上**原先还要绕三道：
+最优路径现在是 **CUDA 直接写 D3D9 纹理 → WPF `D3DImage` 显示**（`D3dView.cs`）：
+kernel 结果全程不离开显存，连"回读进 WriteableBitmap"这一步都省了。
+落地只剩一次标脏区，实测 0 ms。
 
-```
-算完 → 回读到新开的 byte[] → BitmapSource.Create 再拷一遍 → WPF 当成新纹理整个上传
-```
+同一台机器 20 张 1920×1080 精修到 1232×770，各 76 次采样：
 
-后两道每次都要新建一个几 MB 的位图（8MB 直接进大对象堆，翻页多了 GC 压力明显），
-而且新位图意味着新纹理，WPF 得重新上传一次。
-
-现在的做法（`ViewSurface`）：kernel 结果**先留在显存**，UI 线程再让 CUDA 直接回读到
-`WriteableBitmap` 的后备内存（`BackBuffer`），写完标一次脏区就完事：
-
-- 没有中间数组，没有第二次拷贝
-- 位图对象复用，尺寸不变时 WPF 只更新脏区，不必重建纹理
-- 命中结果缓存时连 kernel 都不跑，直接把上次那张拿上来
-
-实测（`--bench`，20 张 1920×1080，精修到 1232×770）：
-
-| | 重采样 | 上屏 | 合计 |
+| | 重采样 | 落地/上屏 | 合计 |
 |---|---|---|---|
-| 复用位图（现在） | 0 ms（显存命中） | **1 ms** | **1 ms** |
-| `--noreuse`（新建位图） | 3–8 ms（含回读 + 新数组） | 0 ms | 3–8 ms |
+| 零拷贝（D3DImage，现在） | 2.88 ms | **0.00 ms** | **2.88 ms** |
+| `--nod3d`（复用位图） | 2.76 ms | 1.89 ms | 4.66 ms |
+| `--noreuse`（每次新建位图） | 3–8 ms | 0 ms | 3–8 ms |
 
-首次（源还没进显存）两边都是约 20 ms，差别只在之后的每一次。
+首次（源还没进显存）三种路径都是约 20 ms，差别只在之后的每一次。
 
-### 关于 D3D9 / D3DImage 零拷贝
+零拷贝的硬前提：**CUDA 设备和 D3D9 设备必须是同一块 GPU**。混合显卡笔记本上
+D3D9 的适配器列表只包含"有输出"的适配器，独显休眠时根本不在列表里。程序会在
+互操作失败时自动向 Windows 图形首选项申请高性能 GPU（写 HKCU
+`UserGpuPreferences`，`--nogpupref` 关闭；用户手动设过的不覆盖），**下一次启动**
+D3D9 就能枚举到独显、通道自动建立。单 NVIDIA 独显的台式机第一次就能直通。
+以上任何一步失败都安静回退复用位图，功能无损。
 
-代码里保留了 CUDA→D3D9 纹理→`D3DImage` 的零拷贝通道（`D3d9.cs`、
-`GpuAccel.RegisterTexture` / `CopyToTexture`），它连最后这一次回读都能省掉。
-但它有个硬前提：**CUDA 设备和 D3D9 设备必须是同一块 GPU**。
-
-在双显卡（Optimus）笔记本上这个前提不成立——实测本机 D3D9 只枚举到 1 个适配器：
-`AMD Radeon(TM) Graphics`（vendor 0x1002），NVIDIA RTX 3080 不在 D3D9 的适配器列表里，
-于是 `cuD3D9CtxCreate` 直接失败。这段代码会自动回退到普通 CUDA 上下文，功能不受影响
-（gpu.log 里能看到 `d3d: ... 回退纯 CUDA 路径`）。
-
-单 NVIDIA 独显的机器上它会自动生效。`--nod3d` 可强制关闭。
+> 排查提示：如果 gpu.log 出现 `RegOpenKeyEx=5` 且令牌诊断显示
+> `完整性=S-1-16-4096`（低完整性），说明 exe 文件被打了低强制标签（某些受管控的
+> 工作目录会整棵树继承），此时写不了 HKCU。把程序拷到别处运行即可恢复，
+> `Publish.ps1` 出包时也会自动把标签拉回 Medium。
 
 ### HEIC / HEIF 说明
 
@@ -293,7 +281,8 @@ CUDA 不可用（无 NVIDIA 卡 / 驱动太旧 / PTX 加载失败）时**不降�
 - 启动参数 `--novram` 关掉显存常驻 + 结果缓存，用于对比缓存收益
 - 启动参数 `--nowrap` 让预载窗口回到线性截断，用于对比「窗口环绕」的收益
 - 启动参数 `--noreuse` 关掉复用位图，回到「每次新建 BitmapSource」的旧路径
-- 启动参数 `--nod3d` 关掉 D3D9 零拷贝通道（双显卡笔记本上它本来也会自动回退）
+- 启动参数 `--nod3d` 关掉 D3D9 零拷贝通道，强制走复用位图
+- 启动参数 `--nogpupref` 禁止程序自动向 Windows 图形首选项申请高性能 GPU
 - 启动参数 `--cmp <图片或目录>` 自检：同一张图分别用 GPU / CPU / WIC 重采样，
   比对逐字节差异与耗时，结果写进 `gpu.log` 后退出（不弹窗口）
 - 诊断日志写在 `%LOCALAPPDATA%\PIKAN\gpu.log`（只记初始化与异常，正常路径几乎不写盘）
@@ -324,6 +313,7 @@ PIKAN-Win64/
 ├── GpuResampler.cs           BitmapSource ↔ GPU 桥接 + 结果缓存 + CPU / WIC 回落
 ├── CpuResampler.cs           CPU 侧 AVX2 Mitchell 重采样 + 高斯模糊（GPU 不可用时顶上）
 ├── ViewSurface.cs            复用 WriteableBitmap：CUDA 结果直接回读进后备缓冲
+├── D3dView.cs                D3DImage 零拷贝通道：CUDA 写 D3D9 纹理 → WPF 直显
 ├── D3d9.cs                   D3D9Ex 手写 COM 封装（零依赖，供 CUDA 互操作用）
 ├── Perf.cs                   分段计时 + 帧冻结监控（`--bench` 开启）
 ├── Kernels/pikan.ptx         CUDA kernel 源码（驱动运行时 JIT）

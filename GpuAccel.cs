@@ -5,6 +5,125 @@ using System.Runtime.InteropServices;
 namespace PIKAN;
 
 /// <summary>
+/// Win32 注册表 API 的最小 P/Invoke。
+///
+/// 不用 Microsoft.Win32.Registry：它对 OpenSubKey(writable) 请求的是一整包权限
+/// （含 KEY_CREATE_SUB_KEY / READ_CONTROL），实测在这台机器的 UserGpuPreferences
+/// 键上会被判 SecurityException；而 RegOpenKeyEx 只请求「读值 + 写值」两项最小
+/// 权限是可以过的。权限要多少给多少，多要反而进不去。
+/// </summary>
+internal static class RegNative
+{
+    private const string Lib = "advapi32.dll";
+
+    internal const uint KeyQueryValue = 0x0001;
+    internal const uint KeySetValue = 0x0002;
+    internal const uint RegSz = 1;
+
+    // 注意：必须按无符号 64 位给。写成 new IntPtr(unchecked((int)0x80000001)) 会被
+    // 符号扩展成 0xFFFFFFFF80000001，Kernel 那边对不上的句柄直接回 ACCESS_DENIED。
+    internal static readonly IntPtr Hkcu = new(unchecked((long)0x80000001L));
+
+    [DllImport(Lib, EntryPoint = "RegOpenKeyExW", CharSet = CharSet.Unicode)]
+    internal static extern int OpenKey(IntPtr root, string subKey, uint reserved, uint sam, out IntPtr result);
+
+    [DllImport(Lib, EntryPoint = "RegCreateKeyExW", CharSet = CharSet.Unicode)]
+    internal static extern int CreateKey(IntPtr root, string subKey, uint reserved, IntPtr cls, uint options,
+                                         uint sam, IntPtr secAttr, out IntPtr result, IntPtr disposition);
+
+    [DllImport(Lib, EntryPoint = "RegQueryValueExW", CharSet = CharSet.Unicode)]
+    internal static extern int QueryValue(IntPtr key, string name, IntPtr reserved, IntPtr type,
+                                          IntPtr data, ref int size);
+
+    [DllImport(Lib, EntryPoint = "RegSetValueExW", CharSet = CharSet.Unicode)]
+    internal static extern int SetValue(IntPtr key, string name, uint reserved, uint type,
+                                        string data, int bytes);
+
+    [DllImport(Lib, EntryPoint = "RegCloseKey")]
+    internal static extern int CloseKey(IntPtr key);
+
+    // ---- 令牌诊断：只在写注册表失败时用一次 ----
+    private const uint TokenQuery = 0x0008;
+    private const int TokenElevationType = 18;
+    private const int TokenIsAppContainer = 29;
+    private const int TokenIntegrityLevel = 25;
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport(Lib, SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr process, uint desired, out IntPtr token);
+
+    [DllImport(Lib, SetLastError = true)]
+    private static extern bool GetTokenInformation(IntPtr token, int infoClass, IntPtr info,
+                                                   int len, out int needed);
+
+    [DllImport(Lib, CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern bool ConvertSidToStringSid(IntPtr sid, out IntPtr str);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr CloseHandle(IntPtr h);
+
+    internal static string TokenDiag()
+    {
+        if (!OpenProcessToken(GetCurrentProcess(), TokenQuery, out IntPtr tok) || tok == IntPtr.Zero)
+        {
+            return "无法打开自身令牌";
+        }
+
+        string il = "?";
+        try
+        {
+            GetTokenInformation(tok, TokenIntegrityLevel, IntPtr.Zero, 0, out int need);
+            IntPtr buf = Marshal.AllocHGlobal(need);
+            try
+            {
+                if (GetTokenInformation(tok, TokenIntegrityLevel, buf, need, out _))
+                {
+                    IntPtr sid = Marshal.ReadIntPtr(buf);
+                    if (sid != IntPtr.Zero && ConvertSidToStringSid(sid, out IntPtr s) && s != IntPtr.Zero)
+                    {
+                        il = Marshal.PtrToStringUni(s) ?? "?";
+                        Marshal.FreeHGlobal(s);
+                    }
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buf);
+            }
+        }
+        catch (Exception e)
+        {
+            il = e.GetType().Name;
+        }
+
+        int appc = -1;
+        int elev = -1;
+        IntPtr i4 = Marshal.AllocHGlobal(8);
+        try
+        {
+            if (GetTokenInformation(tok, TokenIsAppContainer, i4, 4, out _))
+            {
+                appc = Marshal.ReadInt32(i4);
+            }
+
+            if (GetTokenInformation(tok, TokenElevationType, i4, 4, out _))
+            {
+                elev = Marshal.ReadInt32(i4);
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(i4);
+        }
+
+        CloseHandle(tok);
+        return $"完整性={il} AppContainer={appc} ElevationType={elev} User={Environment.UserName}";
+    }
+}
+
+/// <summary>
 /// CUDA Driver API 的 P/Invoke 声明。
 ///
 /// 直接链到驱动自带的 nvcuda.dll（System32 下，随 NVIDIA 驱动安装），
@@ -23,6 +142,8 @@ internal static class CudaNative
     [DllImport(Lib)] internal static extern int cuDeviceGetAttribute(out int value, int attrib, int dev);
 
     [DllImport(Lib, EntryPoint = "cuCtxCreate_v2")] internal static extern int cuCtxCreate(out IntPtr ctx, uint flags, int dev);
+    [DllImport(Lib, EntryPoint = "cuCtxDestroy_v2")] internal static extern int cuCtxDestroy(IntPtr ctx);
+
     [DllImport(Lib, EntryPoint = "cuCtxPushCurrent_v2")] internal static extern int cuCtxPushCurrent(IntPtr ctx);
     [DllImport(Lib, EntryPoint = "cuCtxPopCurrent_v2")] internal static extern int cuCtxPopCurrent(out IntPtr ctx);
 
@@ -146,6 +267,12 @@ public static class GpuAccel
     /// <summary>是否允许走 D3D9 零拷贝路径（--nod3d 关掉，便于 A/B 对比）。</summary>
     public static bool D3dEnabled { get; set; } = true;
 
+    /// <summary>
+    /// 是否允许在 D3D9 找不到可互操作适配器时，自动在 Windows 图形首选项里
+    /// 给本程序申请高性能 GPU（--nogpupref 关掉）。见 RequestGpuPreference。
+    /// </summary>
+    public static bool GpuPrefEnabled { get; set; } = true;
+
     /// <summary>是否真的建成了 D3D9 互操作上下文。只有它为真才能零拷贝上屏。</summary>
     public static bool D3dCtxMode => _d3dCtx;
 
@@ -203,7 +330,7 @@ public static class GpuAccel
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "PIKAN", "gpu.log");
 
-    private static void Log(string line)
+    internal static void Log(string line)
     {
         try
         {
@@ -264,35 +391,160 @@ public static class GpuAccel
             return false;
         }
 
-        int adapter = D3d9.FindAdapter(d3d, 0x10DE);   // NVIDIA
-        Log($"d3d: NVIDIA 适配器序号 = {adapter}（{D3d9.LastDiag}）");
+        // 逐个适配器试，而不是靠厂商 ID 猜。
+        //
+        // 双显卡笔记本上 D3D9 的适配器列表本身就不稳定：有时会列 NVIDIA 独显，
+        // 有时整张表里只剩集显（实测同一台机器两次启动结果不同）。而 vendor ID 也不是
+        // 可靠的判据——真正说了算的是 cuD3D9CtxCreate：它成功了才说明这块 GPU
+        // 同时被 D3D9 和 CUDA 认同一个物理设备。所以让 CUDA 自己判定最稳。
+        uint total = D3d9.AdapterCount(d3d);
 
-        if (!D3d9.CreateDevice(d3d, adapter, out IntPtr dev9))
+        List<int> order = [];
+        System.Text.StringBuilder diags = new();
+
+        for (int i = 0; i < (int)total && i < 8; i++)
         {
-            D3d9.Release(ref d3d);
-            Log("d3d: CreateDeviceEx 失败，回退纯 CUDA 路径");
-            return false;
+            uint vendor = D3d9.AdapterVendorId(d3d, (uint)i);
+            diags.Append($"#{i}:0x{vendor:X4} ");
+
+            // NVIDIA 优先试，其余排后面：成功的机会最大，也就最快
+            if (vendor == 0x10DE)
+            {
+                order.Insert(0, i);
+            }
+            else
+            {
+                order.Add(i);
+            }
         }
 
-        int g = CudaNative.cuD3D9GetDevices(out uint cnt, IntPtr.Zero, 0, dev9, 0);
-        Log($"d3d: cuD3D9GetDevices → {g} {CudaNative.Message(g)}，可用设备 {cnt} 个");
+        Log($"d3d: 枚举到 {total} 个适配器 {diags.ToString().TrimEnd()}");
 
-        int r = CudaNative.cuD3D9CtxCreate(out IntPtr ctx, out int d, 0, dev9);
-        if (r != 0 || ctx == IntPtr.Zero)
+        foreach (int adapter in order)
         {
-            Log($"d3d: cuD3D9CtxCreate 失败 {r} {CudaNative.Message(r)}，回退纯 CUDA 路径");
-            D3d9.Release(ref dev9);
-            D3d9.Release(ref d3d);
-            return false;
+            if (!D3d9.CreateDevice(d3d, adapter, out IntPtr dev9))
+            {
+                Log($"d3d: 适配器 #{adapter} CreateDeviceEx 失败");
+                continue;
+            }
+
+            int g = CudaNative.cuD3D9GetDevices(out uint cnt, IntPtr.Zero, 0, dev9, 0);
+            int r = CudaNative.cuD3D9CtxCreate(out IntPtr ctx, out int d, 0, dev9);
+
+            if (r != 0 || ctx == IntPtr.Zero)
+            {
+                // CUDA 不认这块设备（多半是集显），换下一个
+                Log($"d3d: 适配器 #{adapter} 不可互操作 " +
+                    $"(GetDevices={g}/{cnt}) {CudaNative.Message(r)}");
+                D3d9.Release(ref dev9);
+                continue;
+            }
+
+            _ctx = ctx;
+            _d3d9 = d3d;
+            _d3dDevice = dev9;
+            _d3dCtx = true;
+            dev = d;
+            Log($"d3d: 上下文建在 D3D9Ex 适配器 #{adapter} 上（结果可直接写进纹理）");
+            return true;
         }
 
-        _ctx = ctx;
-        _d3d9 = d3d;
-        _d3dDevice = dev9;
-        _d3dCtx = true;
-        dev = d;
-        Log("d3d: 上下文建在 D3D9Ex 设备上（结果可直接写进纹理）");
-        return true;
+        D3d9.Release(ref d3d);
+        Log("d3d: 没有任何适配器可与 CUDA 互操作，回退纯 CUDA 路径");
+        RequestGpuPreference();
+        return false;
+    }
+
+    /// <summary>
+    /// 混合显卡笔记本上独显平时休眠、不接显示输出，而 legacy D3D9 的适配器列表
+    /// 只包含「有输出」的适配器——此时 CUDA 和 D3D9 根本遇不到同一块 GPU，
+    /// 零拷贝通道无从建立。Windows 图形首选项（设置 → 显示 → 显示卡）能把进程
+    /// 固定到高性能 GPU，等价于写 HKCU 的 UserGpuPreferences；写完要重启进程生效，
+    /// 所以这一次启动仍走位图路径，下次启动自动进入零拷贝。
+    ///
+    /// 只在「CUDA 可用但 D3D9 互操作失败」时才会走到这里；单 NVIDIA 卡的台式机
+    /// 第一次就能互操作成功，永远不会碰注册表。用户已手动设过的不覆盖。
+    /// </summary>
+    private static void RequestGpuPreference()
+    {
+        if (!GpuPrefEnabled)
+        {
+            return;
+        }
+
+        const string sub = @"Software\Microsoft\DirectX\UserGpuPreferences";
+        const uint sam = RegNative.KeyQueryValue | RegNative.KeySetValue;
+
+        try
+        {
+            string exe = Environment.ProcessPath ?? "";
+            if (exe.Length == 0)
+            {
+                return;
+            }
+
+            // 键一般已存在（Windows 自己会建），就不走 CreateKey，少要一份权限
+            int r = RegNative.OpenKey(RegNative.Hkcu, sub, 0, sam, out IntPtr key);
+            if (r != 0)
+            {
+                r = RegNative.CreateKey(RegNative.Hkcu, sub, 0, IntPtr.Zero, 0, sam,
+                                        IntPtr.Zero, out key, IntPtr.Zero);
+            }
+
+            if (r != 0 || key == IntPtr.Zero)
+            {
+                // 最常见的失败原因是进程完整性级别太低（S-1-16-4096 及以下），
+                // 低 IL 进程写不了 HKCU——比如 exe 被打了「低强制标签」时。
+                Log($"d3d: 打开图形首选项失败 RegOpenKeyEx={r}（{RegNative.TokenDiag()}）——" +
+                    "可手动在「设置 → 系统 → 屏幕 → 显示卡」给本程序选高性能 GPU");
+                return;
+            }
+
+            try
+            {
+                // 先读旧值：用户手动设过的就别覆盖
+                int size = 0;
+                string cur = "";
+                if (RegNative.QueryValue(key, exe, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, ref size) == 0)
+                {
+                    IntPtr buf = Marshal.AllocHGlobal(size);
+                    try
+                    {
+                        if (RegNative.QueryValue(key, exe, IntPtr.Zero, IntPtr.Zero, buf, ref size) == 0)
+                        {
+                            cur = Marshal.PtrToStringUni(buf) ?? "";
+                        }
+                    }
+                    finally
+                    {
+                        Marshal.FreeHGlobal(buf);
+                    }
+                }
+
+                if (cur.Contains("GpuPreference=2"))
+                {
+                    return;   // 已经设好了，别动用户的配置
+                }
+
+                string val = "GpuPreference=2;";
+                int w = RegNative.SetValue(key, exe, 0, RegNative.RegSz, val, (val.Length + 1) * 2);
+                if (w != 0)
+                {
+                    Log($"d3d: 写图形首选项失败 RegSetValueEx={w}（{RegNative.TokenDiag()}）");
+                    return;
+                }
+
+                Log("d3d: 已在 Windows 图形首选项为本程序申请高性能 GPU，重启后零拷贝生效");
+            }
+            finally
+            {
+                RegNative.CloseKey(key);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"d3d: 写图形首选项失败 {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     private static bool Init()
@@ -300,19 +552,39 @@ public static class GpuAccel
         int e = CudaNative.cuInit(0);
         if (e != 0) return Fail($"cuInit 失败：{CudaNative.Message(e)}");
 
-        // 优先把上下文建在 D3D9Ex 设备上：这样 kernel 结果可以直接写进 D3D9 纹理，
-        // 由 WPF 的 D3DImage 直接显示，不必回主机内存。失败则退回普通 CUDA 上下文。
+        e = CudaNative.cuDeviceGetCount(out int count);
+        if (e != 0 || count <= 0) return Fail("没有检测到 NVIDIA GPU");
+
         int dev;
-        if (!TryCreateD3dContext(out dev))
+        e = CudaNative.cuDeviceGet(out dev, 0);
+        if (e != 0) return Fail($"cuDeviceGet 失败：{CudaNative.Message(e)}");
+
+        // 先建一个普通上下文把独显叫醒，再去找 D3D9 互操作的可能。
+        //
+        // 顺序很关键：混合显卡笔记本上独显平时休眠、不接任何显示输出，
+        // 而 legacy D3D9 的适配器列表只包含「有输出」的适配器——此时枚举只能看到集显，
+        // 拿它的设备去建 CUDA 上下文自然互操作不了。先把 CUDA 上下文建起来叫醒独显，
+        // 再去枚举，NVIDIA 才可能出现在列表里（实测这台机器上有 / 没有差别很大）。
+        IntPtr warm = IntPtr.Zero;
+        e = CudaNative.cuCtxCreate(out warm, 0, dev);
+        if (e != 0) return Fail($"创建 CUDA 上下文失败：{CudaNative.Message(e)}");
+
+        // 注意用临时变量接 TryCreateD3dContext 的返回值：它失败时 out 出来的是 -1，
+        // 不能直接覆盖上面 cuDeviceGet 拿到的有效设备号。
+        if (TryCreateD3dContext(out int devD3d))
         {
-            e = CudaNative.cuDeviceGetCount(out int count);
-            if (e != 0 || count <= 0) return Fail("没有检测到 NVIDIA GPU");
+            dev = devD3d;
 
-            e = CudaNative.cuDeviceGet(out dev, 0);
-            if (e != 0) return Fail($"cuDeviceGet 失败：{CudaNative.Message(e)}");
-
-            e = CudaNative.cuCtxCreate(out _ctx, 0, dev);
-            if (e != 0) return Fail($"创建 CUDA 上下文失败：{CudaNative.Message(e)}");
+            // 互操作上下文已由 cuD3D9CtxCreate 接管为当前上下文，暖机用的这份可以退了
+            if (CudaNative.cuCtxDestroy(warm) != 0)
+            {
+                Log("d3d: 暖机上下文销毁失败，切到互操作上下文");
+                CudaNative.cuCtxPushCurrent(_ctx);
+            }
+        }
+        else
+        {
+            _ctx = warm;
         }
 
         IntPtr nm = Marshal.AllocHGlobal(256);

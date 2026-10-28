@@ -48,6 +48,28 @@ if (-not (Test-Path $exe)) { throw "发布完成但找不到 $exe" }
 $sizeMb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
 Write-Host "  PIKAN.exe  $sizeMb MB" -ForegroundColor DarkGray
 
+# 低完整性标签清理：
+# 某些受管控的工作目录（例如 agent 工作区）整棵树都带着
+# Mandatory Label\Low Mandatory Level 的继承 ACE，从这里发布的 exe 启动后
+# 会被降成低完整性进程——写不了 HKCU（图形首选项申请失败）、临时目录也受限。
+# 拷到别处使用不受影响，但直接在本目录双击就会中招，这里顺手把标签拉回 Medium。
+Write-Host "`n[3.5/3] 完整性标签检查 ..." -ForegroundColor Cyan
+$label = (icacls $exe 2>$null | Select-String 'Mandatory Label\\(\w+) Mandatory Level')
+if ($label -and $label.Matches.Groups[1].Value -ne 'Medium') {
+    Write-Host "  发现 $($label.Matches.Groups[1].Value) 强制标签，尝试改为 Medium ..." -ForegroundColor Yellow
+    icacls $exe /setintegritylevel M | Out-Null
+    $after = (icacls $exe 2>$null | Select-String 'Mandatory Label\\(\w+) Mandatory Level')
+    if ($after) {
+        Write-Host "  现在的标签: $($after.Matches.Groups[1].Value)" -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host "  标签已清除" -ForegroundColor DarkGray
+    }
+}
+else {
+    Write-Host "  无异常标签" -ForegroundColor DarkGray
+}
+
 if ($NoSign) {
     Write-Host "`n[3/3] 跳过签名（-NoSign）" -ForegroundColor Yellow
 }
