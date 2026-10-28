@@ -164,6 +164,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private bool _snapDirty;
     private long _session;
 
+    // 本次会话的图片来源：退出时要连同"停在第几张"一起落盘，
+    // 下次进来才知道该扫哪个目录（见 AutoRestoreAsync）。
+    private string _sessionRoot = "";
+    private string _sessionKind = "";
+
+    /// <summary>用户自己已经开过图库/文件夹/文件；启动时的自动恢复要让路。</summary>
+    private bool _userLoaded;
+
     private bool _suppressSel;
     private bool _pendingReload;
 
@@ -198,6 +206,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Perf.AttachFrameMonitor();
 
         ReadLastPos();
+
+        // 启动即回到上次退出的目录 + 照片（后台扫目录，不挡窗口显示）
+        _ = AutoRestoreAsync();
     }
 
     // ==================================================================
@@ -356,7 +367,104 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             });
         }
 
-        Status = $"上次看到「{p.LastName}」第 {p.LastIdx + 1} 张 · 点「打开图库」或「回到上次」自动跳回";
+        Status = $"正在恢复上次的位置：{p.LastName}（第 {p.LastIdx + 1} 张 · {p.LastSrc}）";
+    }
+
+    // ==================================================================
+    // 启动自动恢复：目录 + 照片一起回到上次退出时的样子
+    // ==================================================================
+
+    /// <summary>
+    /// 记下本次会话的图片来源。<paramref name="kind"/> 见 <see cref="AppState.LastKind"/>。
+    /// </summary>
+    private void MarkSource(string root, string kind)
+    {
+        _sessionRoot = root;
+        _sessionKind = kind;
+        MarkPos(); // 防抖由 MarkPos 统一负责，退出时 Window_Closing 还会再兜一次
+    }
+
+    private static string FolderLabel(string root)
+    {
+        string name = Path.GetFileName(root);
+        return name.Length > 0 ? name : root;
+    }
+
+    /// <summary>
+    /// 重新扫一次上次退出的目录，并停在上次那张照片上。
+    ///
+    /// 为什么要重扫而不是直接用列表快照：
+    ///   · 目录里新增 / 删除的照片会被自然反映出来（快照是死的）；
+    ///   · 快照最多存 <see cref="AppState.SnapshotMax"/> 条，大图库必然不全；
+    ///   · 按 <see cref="AppState.LastUri"/> 路径命中优先，行数变了也不指错图。
+    /// 快照退化为兜底：目录被挪走 / 删掉，或者上次来源是手工挑的散文件。
+    /// </summary>
+    private async Task AutoRestoreAsync()
+    {
+        try
+        {
+            AppState p = _state;
+            if (p.LastIdx < 0 && p.LastUri.Length == 0)
+            {
+                return; // 首次启动，没有记忆，保持空态
+            }
+
+            await Task.Delay(250); // 先让窗口把空壳画出来，扫描不抢首帧
+
+            bool restored = false;
+            string root = p.LastRoot;
+
+            // 「选择的文件」是用户挑的一批散图，目录里有别的图，不能按目录重扫
+            if (p.LastKind != "files" && root.Length > 0 && Directory.Exists(root))
+            {
+                Status = $"正在恢复上次的目录「{FolderLabel(root)}」…";
+                List<ImageItem>? found = await Task.Run(() => ScanFolder(root));
+
+                // 扫描这几百毫秒里用户可能已经自己开了别的图库，那就别覆盖
+                if (_userLoaded)
+                {
+                    return;
+                }
+
+                if (found is { Count: > 0 })
+                {
+                    MarkSource(root, p.LastKind);
+                    int hit = RestoreIndex(found);
+                    ApplyItems(found, FolderLabel(root));
+
+                    Status = hit >= 0
+                        ? $"已回到上次的位置：{found[hit].Name}（第 {hit + 1} / {found.Count} 张 · {FolderLabel(root)}）"
+                        : $"已恢复上次的目录（{found.Count} 张 · {FolderLabel(root)}）；上次那张照片已不在，从第 1 张开始";
+                    restored = true;
+                }
+            }
+
+            if (!restored && !_userLoaded)
+            {
+                RestoreFromSnapshot();
+            }
+        }
+        catch
+        {
+            // 恢复失败不影响正常使用：空态里照样能点「打开图库」
+        }
+    }
+
+    /// <summary>
+    /// 用上次会话的列表快照恢复。目录不在了、或上次来源是「选择的文件」时走这条路。
+    /// 返回是否真的恢复了列表。
+    /// </summary>
+    private bool RestoreFromSnapshot()
+    {
+        List<ImageItem> list = _state.Snapshot.Where(File.Exists).Select(p => new ImageItem(p)).ToList();
+        if (list.Count == 0)
+        {
+            Status = "上次那批图片找不到了（目录或文件已移动），请打开图库或选择文件夹";
+            return false;
+        }
+
+        ApplyItems(list, _state.LastSrc.Length > 0 ? _state.LastSrc : "上次会话");
+        return true;
     }
 
     /// <summary>算出「应该从第几张开始」。返回 -1 表示没有可恢复的位置。</summary>
@@ -402,6 +510,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _state.LastName = it.Name;
         _state.LastCount = _items.Count;
         _state.LastSrc = _sourceLabel;
+
+        // 目录也一起记：只记"第几张"在图片增删后会指错图，
+        // 记住目录就可以下次重新扫一遍再按路径对位。
+        if (_sessionRoot.Length > 0)
+        {
+            _state.LastRoot = _sessionRoot;
+            _state.LastKind = _sessionKind;
+        }
 
         _posTimer.Stop();
         _posTimer.Start(); // 防抖：滚轮连翻时没必要每张都落盘
@@ -452,10 +568,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (_state.Snapshot.Count > 0)
         {
             Status = "正在用上次会话的列表恢复…";
-            var list = _state.Snapshot.Where(File.Exists).Select(p => new ImageItem(p)).ToList();
-            if (list.Count > 0)
+            if (RestoreFromSnapshot())
             {
-                ApplyItems(list, _state.LastSrc.Length > 0 ? _state.LastSrc : "上次会话");
                 return;
             }
         }
@@ -1464,7 +1578,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         if (Directory.Exists(path))
         {
-            _ = LoadFolderAsync(path);
+            _ = LoadFolderAsync(path, "folder");
             return;
         }
 
@@ -1473,7 +1587,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             string? dir = Path.GetDirectoryName(path);
             if (dir is not null)
             {
-                _ = LoadFolderAsync(dir, path);
+                _ = LoadFolderAsync(dir, "folder", path);
             }
         }
     }
@@ -1488,7 +1602,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        await LoadFolderAsync(root);
+        await LoadFolderAsync(root, "gallery");
     }
 
     private void ActFiles(object sender, RoutedEventArgs e)
@@ -1507,7 +1621,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        ApplyItems(dlg.FileNames.Select(p => new ImageItem(p)).ToList(), "选择的文件");
+        List<ImageItem> picked = dlg.FileNames.Select(p => new ImageItem(p)).ToList();
+        _userLoaded = true;
+
+        // 「选择的文件」是挑出来的一批，目录不代表这批照片 → kind 记 files，
+        // 下次启动用列表快照恢复（按目录重扫会把没挑过的图也带进来）。
+        // 目录仍然记下来，作为快照失效时的兜底线索。
+        string? dir = picked.Count > 0 ? Path.GetDirectoryName(picked[0].Path) : null;
+        if (dir is not null)
+        {
+            MarkSource(dir, "files");
+        }
+
+        ApplyItems(picked, "选择的文件");
     }
 
     private void ActFolder(object sender, RoutedEventArgs e)
@@ -1525,11 +1651,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        _ = LoadFolderAsync(dlg.SelectedPath);
+        _ = LoadFolderAsync(dlg.SelectedPath, "folder");
     }
 
-    private async Task LoadFolderAsync(string root, string? focusPath = null)
+    private async Task LoadFolderAsync(string root, string kind, string? focusPath = null)
     {
+        _userLoaded = true; // 用户主动开目录：启动时的自动恢复要让路
         Status = "正在扫描文件夹…";
         List<ImageItem>? found = await Task.Run(() => ScanFolder(root));
 
@@ -1539,8 +1666,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
+        // 记下来源：下次启动自动回到这里。成功才记，扫空了别把上次的目录冲掉。
+        MarkSource(root, kind);
+
         string capped = found.Count >= ScanCap ? $"（已按 {ScanCap} 张截断）" : "";
-        ApplyItems(found, Path.GetFileName(root).Length > 0 ? Path.GetFileName(root) : root, capped);
+        ApplyItems(found, FolderLabel(root), capped);
 
         if (focusPath is not null)
         {
@@ -1990,7 +2120,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         string first = paths[0];
         if (Directory.Exists(first))
         {
-            _ = LoadFolderAsync(first);
+            _ = LoadFolderAsync(first, "folder");
             return;
         }
 
@@ -2003,6 +2133,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
+        _userLoaded = true;
+        _sessionRoot = ""; // 散文件没有统一目录：别拿第一个文件的目录去覆盖记忆
         ApplyItems(list, "拖放的文件");
     }
 

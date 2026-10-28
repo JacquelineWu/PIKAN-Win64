@@ -24,6 +24,20 @@ public sealed class AppState
     public string LastSrc { get; set; } = "";
 
     /// <summary>
+    /// 上次浏览的**目录**（图片库根 / 选中的文件夹）。
+    /// 只记 picture 位置不够：换台机器、图片挪过地方后序号会对不上，
+    /// 而目录在的话可以重新扫一遍，新增/删掉的图也能自然反映出来。
+    /// 「选择的文件」这种零散来源退化为第一个文件的目录，仅作兜底参考。
+    /// </summary>
+    public string LastRoot { get; set; } = "";
+
+    /// <summary>
+    /// 上次浏览的目录属于哪种来源：`gallery`（我的图片库）/ `folder`（选的文件夹）/ `files`（手工挑的文件）。
+    /// `files` 时不能直接按目录重扫——那批图是用户挑出来的，目录里可能有别的几百张。
+    /// </summary>
+    public string LastKind { get; set; } = "";
+
+    /// <summary>
     /// 「最后一次成功显示」的那张图的路径 —— 下次启动预热的就是它。
     /// 与 LastUri 的区别：那个记的是「停在第几张」（切过去就记，哪怕没解出来），
     /// 这个只在真的解出画面后才记，预热一张打不开的图毫无意义。
