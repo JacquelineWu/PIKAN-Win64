@@ -23,6 +23,7 @@ public partial class App : Application
         // --bench：连续翻页采集分段耗时（写 perf.log），测完自动退出
         bool bench = false;
         bool cmp = false;
+        bool zoomtest = false;
         foreach (string a in e.Args)
         {
             if (string.Equals(a, "--nogpu", StringComparison.OrdinalIgnoreCase))
@@ -66,6 +67,11 @@ public partial class App : Application
             {
                 // 自检：同一张图分别用 GPU 与 CPU 重采样，比对结果与耗时（写 gpu.log）
                 cmp = true;
+            }
+            else if (string.Equals(a, "--zoomtest", StringComparison.OrdinalIgnoreCase))
+            {
+                // 自检：逐档检查放大后有没有按规定需求重新取样（写 gpu.log）
+                zoomtest = true;
             }
             else if (string.Equals(a, "--nowrap", StringComparison.OrdinalIgnoreCase))
             {
@@ -122,7 +128,12 @@ public partial class App : Application
             window.OpenPath(openPath);
         }
 
-        if (bench)
+        if (zoomtest)
+        {
+            // 注意这里不能传 openPath 之前未排除开关：它与 --cmp 一样把首个非 -- 参数当图片
+            _ = window.ZoomSelfTestAsync(openPath);
+        }
+        else if (bench)
         {
             _ = window.BenchAsync(20, 350);
         }

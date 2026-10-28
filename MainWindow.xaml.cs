@@ -9,6 +9,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
+using System.Windows.Interop;
 using System.Windows.Threading;
 using Forms = System.Windows.Forms;
 
@@ -70,6 +71,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private const double ViewEdgeFactor = 1.5;
     private const int ViewEdgeMin = 1200;
     private const int ViewEdgeMax = 4096;
+
+    // ---- 放大时重新取样的档位 ----
+    // ViewEdge 只按「适应窗口」算，放大后就撑不住了：
+    // 那张 1536px 的位图被拉到 2700px 屏幕上 = 拉伸 1.8 倍，糊是必然的。
+    // 放大到一定程度必须回去按屏幕所需重新解一张（真正的「再次 sample」），
+    // 所以这里允许比 ViewEdgeMax 高得多的档位。
+    private const int ZoomEdgeMax = 8192;
+
+    // 单张放大用位图的像素预算（BGRA 4 字节）：64MP ≈ 256 MB。
+    // 再高就是白白占内存——1:1 看一张 4600×6900 的图要 127 MB，已经在预算内。
+    private const long ZoomPixelBudget = 64_000_000;
 
     // ---- 切图过渡：低清图立刻顶上 → 清晰图就绪后直接替换。
     // 早期版本这里有「大模糊 → 分档对焦 → 淡出」的动画，已按需求移除：
@@ -150,6 +162,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     // ---- GPU 加速 ----
     private long _refineSeq;
+    private long _upgradeSeq;
 
     // ---- 预载链 ----
     private long _preloadSeq;
@@ -937,6 +950,47 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     /// <summary>
+    /// 屏幕此刻真正要让 ImageView 撑多少像素（长边），含 **当前 zoom** 与 DPI，留 5% 余量。
+    ///
+    /// 关键是与 <see cref="ViewEdge"/> 的区别：ViewEdge 只代表「适应窗口」时的需求，
+    /// 而这是在 estimating **放大之后** 的需求——放大画面靠的就是这个数。
+    /// Stretch=Uniform 下适应时长边刚好等于可用框长边，所以 Needs = 框长边 × zoom。
+    /// </summary>
+    private int NeededEdge()
+    {
+        double baseEdge = Math.Max(FrameW, FrameH);
+        double dpi = Math.Max(1.0, VisualTreeHelper.GetDpi(this).DpiScaleX);
+        return (int)Math.Ceiling(baseEdge * dpi * _zoom * 1.05);
+    }
+
+    /// <summary>
+    /// 按需求 <paramref name="need"/> 算出该让解码器给到多少档位：
+    /// 夹在 [ViewEdgeMin, ZoomEdgeMax]、不超过原图本身像素（解更大毫无意义），
+    /// 并按像素预算收一收，避免超大图被拖进几百 MB。
+    /// </summary>
+    private static int DecodeEdgeFor(int need, int nativeW, int nativeH)
+    {
+        int native = Math.Max(nativeW, nativeH);
+        if (native <= 0)
+        {
+            return need;
+        }
+
+        int edge = Math.Clamp(need, ViewEdgeMin, ZoomEdgeMax);
+        edge = Math.Min(edge, native);
+
+        double k = edge / (double)native;
+        long px = (long)Math.Round(nativeW * k) * (long)Math.Round(nativeH * k);
+        if (px > ZoomPixelBudget)
+        {
+            double cut = Math.Sqrt(ZoomPixelBudget / (double)px);
+            edge = Math.Max(ViewEdgeMin, (int)Math.Floor(edge * cut));
+        }
+
+        return edge;
+    }
+
+    /// <summary>
     /// 切到第 idx 张：
     ///   ① 代号 +1，作废一切在途的异步回调；
     ///   ② 命中预载缓存 → 那张图已经是「可显示清晰度」，直接上主视图，不等解码；
@@ -1074,7 +1128,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
         }
 
+        // 常规按画布取档；但如果在放大状态下翻到这里（zoom > 适应），
+        // 再按 ViewEdge 解一张照样不够——必须按放大后的真实需求取档，否则还是糊的。
         int edge = ViewEdge();
+        int need = NeededEdge();
+        if (need > edge)
+        {
+            edge = Math.Min(need, ZoomEdgeMax);
+        }
 
         // 并发闸门：快速翻页时最多 2 个解码在跑，排队的那个一旦发现自己已经过期
         // （token 变了）就直接放弃，不再做无用功。这是原先「滚轮节流」的真正替代者。
@@ -1129,7 +1190,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// （带 area sampling 的抗走样降采样），并且输出恰好等于显示像素，
     /// 于是 WPF 拿到的是 1:1 位图，不再二次采样。
     ///
-    /// 放大不做精修（那只会凭空造像素），交给 WPF 的 RenderTransform。
+    /// 精修只管「降采样」。放大时目标比源还大，这里不动（目标是要 new 像素，
+    /// 交给 WPF 插值）；真正需要更高清晰度时由 <see cref="UpgradeViewAsync"/>
+    /// 回解码器按屏幕所需重新取一张，那才是「放大后再次 sample」。
     /// </summary>
     private async Task RefineViewAsync(DecodedImage src, long token)
     {
@@ -1345,7 +1408,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         GpuAccel.WriteLog(line);
     }
 
-    /// <summary>缩放/旋转/换图后请求一次 GPU 精修；连续操作只保留最后一次。</summary>
+    /// <summary>缩放/旋转/换图后请求一次重新取样；连续操作只保留最后一次。</summary>
     private void ScheduleRefine()
     {
         if (_viewOwned is null)
@@ -1353,7 +1416,79 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
+        (int w, int h) = TargetPixelSize(_viewOwned);
+        int need = Math.Max(w, h);
+        int have = Math.Max(_viewOwned.Source.PixelWidth, _viewOwned.Source.PixelHeight);
+
+        // 屏幕要的比手上这张多（放大了），且实际还能从原图取到更多像素
+        // → 回去按新需求重新解码，这才是「再次 sample」。
+        // have 已经等于原图像素时就到此为止：再解也解不出更多东西，
+        // 剩下的（>100% 的放大）只能交给 WPF 插值。
+        int native = Math.Max(_viewOwned.Width, _viewOwned.Height);
+        if (need > have && have < native)
+        {
+            _ = UpgradeViewAsync(_viewOwned, need, _curToken);
+            return;
+        }
+
         _ = RefineViewAsync(_viewOwned, _curToken);
+    }
+
+    /// <summary>
+    /// 放大之后按屏幕所需重新取一张更高档的位图。
+    ///
+    /// 为什么必须回原图而不是把现有位图放大：
+    /// 现有这张是「适应窗口」那档（1536px 之类），放大到 2700px 时 WPF 只能插值，
+    /// 补出来的全是猜测像素。回解码器按 2700px 重新采样，拿到的是原始信息。
+    /// 解码由 WIC 完成（它本身就是高质量重采样），回来后再交给 GPU 精修对齐到目标像素。
+    /// </summary>
+    private async Task UpgradeViewAsync(DecodedImage cur, int need, long token)
+    {
+        long seq = ++_upgradeSeq;
+
+        int edge = DecodeEdgeFor(need, cur.Width, cur.Height);
+        if (edge <= Math.Max(cur.Source.PixelWidth, cur.Source.PixelHeight))
+        {
+            return; // 手上这张已经比请求档更高/相同，不用白解一遍
+        }
+
+        // 与精修一样等一小会儿：连点放大时只算最后一次，中间的作废
+        await Task.Delay(RefineDelayMs);
+        if (seq != _upgradeSeq || token != _curToken)
+        {
+            return;
+        }
+
+        await DecodeGate.WaitAsync();
+        DecodedImage? bigger;
+        try
+        {
+            if (seq != _upgradeSeq || token != _curToken)
+            {
+                return;
+            }
+
+            Stopwatch sw = Stopwatch.StartNew();
+            bigger = await Task.Run(() => Decoder.Decode(cur.Path, edge));
+            Perf.Span($"  解码 放大档 edge={edge}", sw.ElapsedMilliseconds);
+        }
+        finally
+        {
+            DecodeGate.Release();
+        }
+
+        if (bigger is null || seq != _upgradeSeq || token != _curToken)
+        {
+            return;
+        }
+
+        // 换上去的那张按原图比例、取 Higher 档；_imgW/_imgH 不变，所以 FitFactor 与
+        // 当前的 zoom / 平移完全不受影响，画面位置不会跳。
+        ShowDecoded(bigger);
+        ClearBlur();
+
+        // 到位后再让 GPU 精修一次，把它对齐到屏幕像素（通常这一步已是 1:1 级降采样）
+        _ = RefineViewAsync(bigger, token);
     }
 
     private void NoteShown(string path)
@@ -2310,4 +2445,97 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void ActSlide(object sender, RoutedEventArgs e) => ToggleSlide();
     private void ActFull(object sender, RoutedEventArgs e) => SetFull(!_fullscreen);
     private void ActResume(object sender, RoutedEventArgs e) => ResumeLast();
+
+    /// <summary>
+    /// 自检：逐档量化「屏幕要多少像素 vs 手上位图有多少」，写 gpu.log 后退出。
+    /// 比值 &gt; 1 就说明画面在拉伸 = 会糊；比值 ≈ 1 表示做到了「放大后再次取样」。
+    ///
+    /// 用法：PIKAN.exe --zoomtest <图片>
+    /// </summary>
+    public async Task ZoomSelfTestAsync(string? path)
+    {
+        if (path is null)
+        {
+            GpuAccel.WriteLog("zoomtest: 需要一张图片路径");
+            Finish();
+            return;
+        }
+
+        // 自检期间必须屏蔽输入：否则测到一半有人动一下鼠标/滚轮，zoom 就变了，
+        // 读数会像「档位错乱」，实际是外部输入。
+        CanvasArea.PreviewMouseDown += (_, e) => e.Handled = true;
+        CanvasArea.PreviewMouseUp += (_, e) => e.Handled = true;
+        CanvasArea.PreviewMouseWheel += (_, e) => e.Handled = true;
+        CanvasArea.PreviewMouseMove += (_, e) => e.Handled = true;
+
+        await Dispatcher.InvokeAsync(() => OpenPath(path));
+        await Task.Delay(4000); // 等载入、精修到位
+
+        (string Name, Func<double> Zoom)[] steps =
+        {
+            ("适应", () => 1.0),
+            ("200%", () => 2.0),
+            ("400%", () => 4.0),
+            ("1:1", () => 1.0 / Math.Max(1e-9, FitFactor()))
+        };
+
+        foreach ((string name, Func<double> zoom) in steps)
+        {
+            await Dispatcher.InvokeAsync(() =>
+            {
+                _tx = 0;
+                _ty = 0;
+                _zoom = Clamp(zoom(), MinScale, MaxScale);
+                UpdateTransform();
+                RefreshImageInfo();
+                ScheduleRefine();
+            });
+
+            await Task.Delay(2500); // 重新解码 + GPU 精修要花点时间
+
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (_viewOwned is null)
+                {
+                    GpuAccel.WriteLog($"zoomtest {name}: 没有主视图");
+                    return;
+                }
+
+                // 显示链路有两套：普通 BitmapSource（含精修后的 WriteableBitmap）
+                // 与零拷贝的 D3DImage，两者尺寸属性不通用，分开取。
+                (int tw, int th) = TargetPixelSize(_viewOwned);
+                int bw = 0;
+                int bh = 0;
+                switch (MainImage.Source)
+                {
+                    case BitmapSource bs:
+                        bw = bs.PixelWidth;
+                        bh = bs.PixelHeight;
+                        break;
+                    case D3DImage d3:
+                        bw = d3.PixelWidth;
+                        bh = d3.PixelHeight;
+                        break;
+                }
+
+                double ratio = bw > 0 ? Math.Max(tw / (double)bw, th / (double)bh) : 0;
+
+                GpuAccel.WriteLog($"zoomtest {name}: zoom={_zoom:F2}  屏幕需 {tw}x{th}  " +
+                                  $"位图 {bw}x{bh}（档 {_viewOwned.Edge}）  原图 {_viewOwned.Width}x{_viewOwned.Height}  " +
+                                  $"拉伸比 {ratio:F2}{(ratio > 1.02 ? "  ← 不够，会糊" : "  ✓ 够用")}");
+            });
+        }
+
+        Finish();
+    }
+
+    private static void Finish()
+    {
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(500);
+            await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                System.Windows.Application.Current.Shutdown());
+        });
+    }
 }
