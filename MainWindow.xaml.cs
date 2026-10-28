@@ -167,7 +167,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private bool _suppressSel;
     private bool _pendingReload;
 
-    private WindowState _prevWindowState = WindowState.Normal;
+    private WindowState _prevWindowState = WindowState.Maximized;
     private WindowStyle _prevWindowStyle = WindowStyle.SingleBorderWindow;
     private ResizeMode _prevResizeMode = ResizeMode.CanResize;
 

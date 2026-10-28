@@ -4,6 +4,7 @@
         Title="PIKAN"
         Width="1280" Height="780"
         MinWidth="720" MinHeight="440"
+        WindowState="Maximized"
         Background="#101216"
         Foreground="#e8ecf4"
         FontFamily="Segoe UI"

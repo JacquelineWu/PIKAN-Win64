@@ -33,15 +33,33 @@ Write-Host "dotnet: $($dotnet.Source)" -ForegroundColor DarkGray
 
 Set-Location $PSScriptRoot
 
+# NuGet restore 在部分受管控环境里会抛 “Value cannot be null (Parameter 'path1')”，
+# 与本工程代码无关。这里做一次兜底：正常跑一遍，失败就用 --no-restore 再跑
+# （obj\project.assets.json 已在，缺的只是联网还原）。
+function Invoke-Dotnet {
+    param([Parameter(ValueFromRemainingArguments = $true)] [string[]] $Args)
+
+    & $dotnet.Source @Args
+    $code = $LASTEXITCODE
+
+    if ($null -eq $code -or $code -ne 0) {
+        Write-Host "  （首次尝试未成功，改用 --no-restore 重试）" -ForegroundColor Yellow
+        & $dotnet.Source @Args '--no-restore'
+        $code = $LASTEXITCODE
+    }
+
+    if ($null -eq $code -or $code -ne 0) {
+        throw "dotnet $($Args -join ' ') 失败（exit $code）"
+    }
+}
+
 Write-Host "`n[1/3] 编译 Release ..." -ForegroundColor Cyan
-& $dotnet.Source build -c Release
-if ($LASTEXITCODE -ne 0) { throw "编译失败（exit $LASTEXITCODE）" }
+Invoke-Dotnet build -c Release
 
 Write-Host "`n[2/3] 发布便携版 → $Out" -ForegroundColor Cyan
-& $dotnet.Source publish -c Release -r win-x64 --self-contained true `
+Invoke-Dotnet publish -c Release -r win-x64 --self-contained true `
     -p:PublishSingleFile=false -p:DebugType=none -p:SatelliteResourceLanguages=en `
     -o $Out
-if ($LASTEXITCODE -ne 0) { throw "发布失败（exit $LASTEXITCODE）" }
 
 $exe = Join-Path $Out 'PIKAN.exe'
 if (-not (Test-Path $exe)) { throw "发布完成但找不到 $exe" }
