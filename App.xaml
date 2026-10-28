@@ -39,10 +39,5 @@
                 </Setter.Value>
             </Setter>
         </Style>
-
-        <!-- 左侧控制条里的按钮：横向撑满 -->
-        <Style x:Key="PaneButton" TargetType="Button" BasedOn="{StaticResource ToolButton}">
-            <Setter Property="HorizontalAlignment" Value="Stretch" />
-        </Style>
     </Application.Resources>
 </Application>

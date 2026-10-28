@@ -88,7 +88,6 @@
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
-                        <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
 
                     <!-- 列表抬头 -->
@@ -216,28 +215,6 @@
                                    TextAlignment="Center"
                                    TextWrapping="Wrap" />
                     </StackPanel>
-
-                    <!-- 底部视图控制条 -->
-                    <Border Grid.Row="2" BorderBrush="#2a2f3a" BorderThickness="0,1,0,0" Padding="8,6,8,10">
-                        <StackPanel>
-                            <UniformGrid Columns="2">
-                                <Button Content="适应" Style="{StaticResource PaneButton}" Click="ActFit" />
-                                <Button Content="1:1" Style="{StaticResource PaneButton}" Click="ActOne" />
-                            </UniformGrid>
-                            <UniformGrid Columns="2" Margin="0,2,0,0">
-                                <Button Content="－" Style="{StaticResource PaneButton}" Click="ActZoomOut" />
-                                <Button Content="＋" Style="{StaticResource PaneButton}" Click="ActZoomIn" />
-                            </UniformGrid>
-                            <UniformGrid Columns="2" Margin="0,2,0,0">
-                                <Button Content="左旋" Style="{StaticResource PaneButton}" Click="ActRotL" />
-                                <Button Content="右旋" Style="{StaticResource PaneButton}" Click="ActRotR" />
-                            </UniformGrid>
-                            <UniformGrid Columns="2" Margin="0,2,0,0">
-                                <Button Content="镜像H" Style="{StaticResource PaneButton}" Click="ActFlipH" />
-                                <Button Content="镜像V" Style="{StaticResource PaneButton}" Click="ActFlipV" />
-                            </UniformGrid>
-                        </StackPanel>
-                    </Border>
                 </Grid>
             </Border>
 

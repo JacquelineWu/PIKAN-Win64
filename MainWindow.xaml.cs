@@ -2026,6 +2026,26 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
+        // Shift+字母：原来在左下角按钮上的三个功能（左旋 / 镜像），改走键盘
+        if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0)
+        {
+            switch (e.Key)
+            {
+                case Key.R:
+                    RotateBy(-90);
+                    e.Handled = true;
+                    return;
+                case Key.H:
+                    ToggleFlipH();
+                    e.Handled = true;
+                    return;
+                case Key.V:
+                    ToggleFlipV();
+                    e.Handled = true;
+                    return;
+            }
+        }
+
         switch (e.Key)
         {
             case Key.Left:
@@ -2280,12 +2300,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         FlushPos();
     }
 
-    private void ActFit(object sender, RoutedEventArgs e)
-    {
-        ResetView();
-        Status = "已适应窗口";
-    }
-
     private void ActGpu(object sender, RoutedEventArgs e) => ToggleGpu();
 
     /// <summary>切换 GPU / CPU 渲染路径，便于直接对比画质与流畅度。</summary>
@@ -2435,13 +2449,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         OnPropertyChanged(nameof(GpuTip));
     }
 
-    private void ActOne(object sender, RoutedEventArgs e) => ZoomPixelPerfect();
-    private void ActZoomIn(object sender, RoutedEventArgs e) => ZoomBy(1.25);
-    private void ActZoomOut(object sender, RoutedEventArgs e) => ZoomBy(0.8);
-    private void ActRotL(object sender, RoutedEventArgs e) => RotateBy(-90);
-    private void ActRotR(object sender, RoutedEventArgs e) => RotateBy(90);
-    private void ActFlipH(object sender, RoutedEventArgs e) => ToggleFlipH();
-    private void ActFlipV(object sender, RoutedEventArgs e) => ToggleFlipV();
     private void ActSlide(object sender, RoutedEventArgs e) => ToggleSlide();
     private void ActFull(object sender, RoutedEventArgs e) => SetFull(!_fullscreen);
     private void ActResume(object sender, RoutedEventArgs e) => ResumeLast();
