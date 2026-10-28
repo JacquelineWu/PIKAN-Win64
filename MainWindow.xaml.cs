@@ -1012,7 +1012,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private async Task RefineViewAsync(DecodedImage src, long token)
     {
         long seq = ++_refineSeq;
-        if (!GpuResampler.GpuActive)
+
+        // GPU 不可用时，只要有 CPU 的高质量重采样（AVX2 Mitchell）就照样精修：
+        // 否则非 NVIDIA 机器只能靠 WPF 自己缩放（双线性，高频细节会糊）。
+        // --noavx 关掉 CPU 回退后才彻底交给 WPF。
+        bool cpuOnly = !GpuResampler.GpuActive;
+        if (cpuOnly && !CpuResampler.Enabled)
         {
             return;
         }
@@ -1036,7 +1041,34 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return; // 已经是 1:1 或需要放大，保持原图
         }
 
-        // ① 结果缓存命中：连 kernel 都不用跑，直接把上次那张拿上来
+        // ① CPU 分支：GPU 不可用，用 AVX2 Mitchell 算一张成品位图（结果缓存照样命中）
+        if (cpuOnly)
+        {
+            BitmapSource? cpuMade;
+            try
+            {
+                Stopwatch swc2 = Stopwatch.StartNew();
+                cpuMade = await Task.Run(() => GpuResampler.ResizeCached(src.Path, src.Source, w, h, src.Edge));
+                Perf.Span($"  CPU 重采样[{GpuResampler.LastFrom}] {src.Source.PixelWidth}x{src.Source.PixelHeight} → {w}x{h}",
+                          swc2.ElapsedMilliseconds);
+            }
+            catch (Exception ex)
+            {
+                GpuDiagnose($"cpu refine 异常 {ex.GetType().Name}: {ex.Message}");
+                return;
+            }
+
+            if (cpuMade is null || seq != _refineSeq || token != _curToken)
+            {
+                return;
+            }
+
+            MainImage.Source = cpuMade;
+            Perf.Tick("CPU 精修上屏");
+            return;
+        }
+
+        // ② 结果缓存命中：连 kernel 都不用跑，直接把上次那张拿上来
         if (ViewSurface.ReuseEnabled)
         {
             BitmapSource? hit = GpuResampler.TryResult(src.Path, src.Source, w, h);
@@ -1052,7 +1084,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 return;
             }
 
-            // ② 后台算完留在显存，UI 线程再直接写进复用位图：
+            // ③ 后台算完留在显存，UI 线程再直接写进复用位图：
             //    没有中间数组、没有新位图，尺寸不变时 WPF 也不必重建纹理。
             bool computed;
             try
@@ -1085,7 +1117,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
         }
 
-        // ③ 兜底：原来的「新建位图」路径（--noreuse 或复用失败时走这里）
+        // ④ 兜底：原来的「新建位图」路径（--noreuse 或复用失败时走这里）
         BitmapSource? refined;
         try
         {

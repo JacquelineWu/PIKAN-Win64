@@ -29,7 +29,7 @@ public static class GpuResampler
 
     /// <summary>状态栏用的一行说明（不触发初始化；初始化中显示「正在检测」）。</summary>
     public static string StatusTextReady =>
-        !Enabled ? "GPU 已关闭（CPU 渲染）"
+        !Enabled ? $"CPU 渲染（{CpuResampler.ModeName}）"
         : GpuAccel.IsReady ? $"CUDA · {GpuAccel.DeviceNameOrEmpty}"
         : "CPU 渲染（正在检测 GPU…）";
 
@@ -137,7 +137,28 @@ public static class GpuResampler
             }
         }
 
-        return WicResize(src, ow, oh);
+        // GPU 不可用：走 CPU 的 AVX2 Mitchell（画质与 GPU 版一致），再不行才回 WIC 双线性
+        return CpuResize(src, ow, oh) ?? WicResize(src, ow, oh);
+    }
+
+    /// <summary>CPU 侧高质量重采样：把 BitmapSource 转成 BGRA 后交给 CpuResampler。</summary>
+    private static BitmapSource? CpuResize(BitmapSource src, int ow, int oh)
+    {
+        if (!CpuResampler.Enabled)
+        {
+            return null;
+        }
+
+        byte[]? inBuf = Pixels(src);
+        if (inBuf is null)
+        {
+            return null;
+        }
+
+        byte[] outBuf = new byte[ow * oh * 4];
+        return CpuResampler.Resize(inBuf, src.PixelWidth, src.PixelHeight, outBuf, ow, oh)
+            ? FromBgra(outBuf, ow, oh)
+            : null;
     }
 
     // ==================================================================
@@ -221,7 +242,16 @@ public static class GpuResampler
             }
         }
 
-        made ??= WicResize(src, ow, oh);
+        if (made is null)
+        {
+            made = CpuResize(src, ow, oh);          // GPU 不可用 → AVX2 Mitchell
+            if (made is not null)
+            {
+                LastFrom = "CPU/" + CpuResampler.ModeName;
+            }
+        }
+
+        made ??= WicResize(src, ow, oh);            // 最后才是 WIC 双线性
 
         if (LastFrom.Length == 0)
         {
@@ -336,7 +366,7 @@ public static class GpuResampler
         }
     }
 
-    private static BitmapSource? WicResize(BitmapSource src, int ow, int oh)
+    internal static BitmapSource? WicResize(BitmapSource src, int ow, int oh)
     {
         try
         {
@@ -357,28 +387,40 @@ public static class GpuResampler
 
     /// <summary>
     /// 高斯模糊。radius 语义与 WPF BlurEffect 的 Radius 对齐（≈ 标准差 σ）。
-    /// GPU 不可用时返回 null —— 调用方应保留原有的 BlurEffect 路径。
+    /// GPU 走分离高斯，不可用时有 AVX2 版本顶上；两条路都失败返回 null，
+    /// 调用方回落到 WPF 的 BlurEffect。
     /// </summary>
     public static BitmapSource? Blur(BitmapSource src, double radius)
     {
-        if (!GpuActive || radius <= 0.01 || src.PixelWidth <= 0 || src.PixelHeight <= 0)
+        if (radius <= 0.01 || src.PixelWidth <= 0 || src.PixelHeight <= 0)
         {
             return null;
         }
 
-        byte[]? inBuf = Pixels(src);
-        if (inBuf is null)
+        if (GpuActive)
+        {
+            byte[]? inBuf = Pixels(src);
+            if (inBuf is not null)
+            {
+                byte[] tmp = new byte[inBuf.Length];
+                byte[] outBuf = new byte[inBuf.Length];
+                if (GpuAccel.Blur(inBuf, tmp, outBuf, src.PixelWidth, src.PixelHeight, radius))
+                {
+                    return FromBgra(outBuf, src.PixelWidth, src.PixelHeight);
+                }
+            }
+        }
+
+        // CPU 版：同样是分离高斯，AVX2 实现
+        byte[]? cpu = Pixels(src);
+        if (cpu is null)
         {
             return null;
         }
 
-        byte[] tmp = new byte[inBuf.Length];
-        byte[] outBuf = new byte[inBuf.Length];
-        if (!GpuAccel.Blur(inBuf, tmp, outBuf, src.PixelWidth, src.PixelHeight, radius))
-        {
-            return null;
-        }
-
-        return FromBgra(outBuf, src.PixelWidth, src.PixelHeight);
+        byte[] dst = new byte[cpu.Length];
+        return CpuResampler.Blur(cpu, null, dst, src.PixelWidth, src.PixelHeight, radius)
+            ? FromBgra(dst, src.PixelWidth, src.PixelHeight)
+            : null;
     }
 }

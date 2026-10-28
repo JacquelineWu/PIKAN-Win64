@@ -49,7 +49,7 @@ internal static class CudaNative
     [DllImport(Lib, EntryPoint = "cuD3D9CtxCreate_v2")]
     internal static extern int cuD3D9CtxCreate(out IntPtr ctx, out int dev, uint flags, IntPtr d3dDevice);
 
-    [DllImport(Lib, EntryPoint = "cuD3D9GetDevices_v2")]
+    [DllImport(Lib, EntryPoint = "cuD3D9GetDevices")]
     internal static extern int cuD3D9GetDevices(out uint count, IntPtr devices, uint deviceCount,
                                                 IntPtr d3dDevice, uint deviceList);
 

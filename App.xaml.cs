@@ -22,6 +22,7 @@ public partial class App : Application
         // --nogpu：强制走 CPU 渲染，便于对比画质 / 排查 GPU 相关问题
         // --bench：连续翻页采集分段耗时（写 perf.log），测完自动退出
         bool bench = false;
+        bool cmp = false;
         foreach (string a in e.Args)
         {
             if (string.Equals(a, "--nogpu", StringComparison.OrdinalIgnoreCase))
@@ -38,6 +39,16 @@ public partial class App : Application
                 // A/B 对照用：关掉显存常驻 + 结果缓存，回到「每次都上传重算」的旧路径
                 GpuImageCache.Enabled = false;
                 GpuResampler.ResultCacheEnabled = false;
+            }
+            else if (string.Equals(a, "--noavx", StringComparison.OrdinalIgnoreCase))
+            {
+                // A/B 对照用：关掉 CPU 的 AVX2 Mitchell，回落到 WIC 双线性
+                CpuResampler.Enabled = false;
+            }
+            else if (string.Equals(a, "--cmp", StringComparison.OrdinalIgnoreCase))
+            {
+                // 自检：同一张图分别用 GPU 与 CPU 重采样，比对结果与耗时（写 gpu.log）
+                cmp = true;
             }
             else if (string.Equals(a, "--nowrap", StringComparison.OrdinalIgnoreCase))
             {
@@ -59,12 +70,6 @@ public partial class App : Application
 
         base.OnStartup(e);
 
-        MainWindow window = new();
-        window.Show();
-
-        // 防止窗口被别的窗口盖住 / 起在后台，看起来像"双击没反应"
-        window.Activate();
-
         // 支持命令行 / 资源管理器「打开方式」：PIKAN.exe <图片文件 或 文件夹>
         // （-- 开头的开关不算路径）
         string? openPath = null;
@@ -76,6 +81,19 @@ public partial class App : Application
                 break;
             }
         }
+
+        if (cmp)
+        {
+            GpuAccel.WriteLog("cmp: " + CpuResampler.SelfTest(openPath));
+            Shutdown();
+            return;
+        }
+
+        MainWindow window = new();
+        window.Show();
+
+        // 防止窗口被别的窗口盖住 / 起在后台，看起来像"双击没反应"
+        window.Activate();
 
         if (openPath is not null)
         {

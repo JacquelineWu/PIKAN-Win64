@@ -267,17 +267,35 @@ Kernels/pikan.ptx kernel 源码（文本，随输出目录复制，驱动运行�
    放大不精修（那只会凭空造像素），交给 `RenderTransform`。
 2. ~~切图对焦动画的模糊~~ —— **已取消**（见下）。CUDA 高斯 kernel 仍在 PTX 里，随时可接回来。
 
-### 降级与开关
+### 降级：CPU 上的 AVX2 Mitchell
 
-CUDA 不可用时（无 NVIDIA 卡 / 驱动太旧 / PTX 加载失败）全部安静回落：
-精修走 WIC 的 `TransformedBitmap`，功能不受影响。
+CUDA 不可用（无 NVIDIA 卡 / 驱动太旧 / PTX 加载失败）时**不降画质**——
+精修改由 `CpuResampler` 在 CPU 上跑同一套 Mitchell-Netravali：`System.Runtime.Intrinsics`
+的 AVX2 + FMA，分离式两趟（水平 → 垂直），权重表预计算并紧凑打包。
+没有 AVX2 的机器再退到标量版，最后才落回 WIC。
+
+高频测试图（3px 棋盘 + 细条纹 + 噪点，1536×960 → 983×614）实测：
+
+| 实现 | 耗时 | 与 CUDA 版逐字节平均差 | PSNR |
+|---|---|---|---|
+| CUDA（PTX kernel，2D 卷积） | 2–3 ms | — | — |
+| **CPU AVX2（分离两趟）** | 20–23 ms | **0.38**（最大 1） | 52.4 dB |
+| WIC `TransformedBitmap` | 5–8 ms | 9.06 | — |
+
+也就是说：**WIC 快 3 倍，但画质明显不如**；CPU 版在高频细节上几乎复刻了 CUDA 的结果
+（差 0.38 个灰阶，肉眼不可见）。`--cmp` 会把这三个数都量出来。
+
+### 开关
 
 - 顶栏 `CUDA` / `CPU` 按钮点击切换，**Ctrl+G** 同效，状态栏右端显示当前后端与设备名
-- 启动参数 `--nogpu` 强制 CPU 渲染，便于对比
+- 启动参数 `--nogpu` 强制 CPU 渲染（走 AVX2），便于对比
+- 启动参数 `--noavx` 关掉 CPU 的 AVX2 Mitchell，回落到 WIC 双线性
 - 启动参数 `--novram` 关掉显存常驻 + 结果缓存，用于对比缓存收益
 - 启动参数 `--nowrap` 让预载窗口回到线性截断，用于对比「窗口环绕」的收益
 - 启动参数 `--noreuse` 关掉复用位图，回到「每次新建 BitmapSource」的旧路径
 - 启动参数 `--nod3d` 关掉 D3D9 零拷贝通道（双显卡笔记本上它本来也会自动回退）
+- 启动参数 `--cmp <图片或目录>` 自检：同一张图分别用 GPU / CPU / WIC 重采样，
+  比对逐字节差异与耗时，结果写进 `gpu.log` 后退出（不弹窗口）
 - 诊断日志写在 `%LOCALAPPDATA%\PIKAN\gpu.log`（只记初始化与异常，正常路径几乎不写盘）
 
 > 一个坑：CUDA 初始化要 1~2 秒。凡是**界面上**读 GPU 状态的地方都用
@@ -303,7 +321,11 @@ PIKAN-Win64/
 ├── StateStore.cs             位置记忆 + 列表快照 → %LOCALAPPDATA%\PIKAN\state.json
 ├── GpuAccel.cs               CUDA Driver API：上下文 / PTX JIT / kernel 调度 / 缓冲复用
 ├── GpuImageCache.cs          显存常驻缓存：预载图常驻显存 + LRU + 跟随窗口淘汰
-├── GpuResampler.cs           BitmapSource ↔ GPU 桥接 + 结果缓存 + WIC 回落
+├── GpuResampler.cs           BitmapSource ↔ GPU 桥接 + 结果缓存 + CPU / WIC 回落
+├── CpuResampler.cs           CPU 侧 AVX2 Mitchell 重采样 + 高斯模糊（GPU 不可用时顶上）
+├── ViewSurface.cs            复用 WriteableBitmap：CUDA 结果直接回读进后备缓冲
+├── D3d9.cs                   D3D9Ex 手写 COM 封装（零依赖，供 CUDA 互操作用）
+├── Perf.cs                   分段计时 + 帧冻结监控（`--bench` 开启）
 ├── Kernels/pikan.ptx         CUDA kernel 源码（驱动运行时 JIT）
 ├── Publish.ps1               一键出包：编译 → 发布 portable\ → 签名
 ├── Sign.ps1                  Authenticode 自签（默认签 portable\PIKAN.exe）
@@ -357,6 +379,7 @@ PIKAN-Win64/
 GPU 重采样[结果缓存] 1087x1536 → 588x830  0 ms     ← 零计算
 GPU 重采样[显存命中] 1280x853 → 1232x821   7 ms     ← 源已在显存，未上传
 GPU 重采样[常规上传] 1280x853 → 1232x821  15 ms     ← --novram 时的旧路径
+CPU 重采样[CPU/AVX2] 1536x960 → 1232x770    23 ms    ← --nogpu 时走 AVX2（后台线程，不阻塞 UI）
 ```
 
 优化前后对照（同一台机器、同一个 136 张的图库，间隔 350 ms 连续翻页）：
