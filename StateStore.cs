@@ -53,6 +53,9 @@ public sealed class AppState
     /// <summary>是否按自然序（一开就是 true：(1) (2) (11) 而不是 (1) (11) (2)）。</summary>
     public bool NaturalSort { get; set; } = true;
 
+    /// <summary>用户在「选项」里勾选的看图策略（五项，默认全开）。</summary>
+    public AppOptions Options { get; set; } = new();
+
     private static string FilePath
     {
         get
@@ -65,7 +68,7 @@ public sealed class AppState
         }
     }
 
-    private static readonly JsonSerializerOptions Options = new()
+    private static readonly JsonSerializerOptions JsonOpts = new()
     {
         WriteIndented = true,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
@@ -82,7 +85,7 @@ public sealed class AppState
             }
 
             string json = File.ReadAllText(path);
-            return JsonSerializer.Deserialize<AppState>(json, Options) ?? new AppState();
+            return JsonSerializer.Deserialize<AppState>(json, JsonOpts) ?? new AppState();
         }
         catch
         {
@@ -99,7 +102,7 @@ public sealed class AppState
                 Snapshot = Snapshot.Take(SnapshotMax).ToList();
             }
 
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(this, Options));
+            File.WriteAllText(FilePath, JsonSerializer.Serialize(this, JsonOpts));
         }
         catch
         {

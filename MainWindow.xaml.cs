@@ -143,6 +143,26 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private bool _flipH;
     private bool _flipV;
 
+    /// <summary>EXIF 方向带来的基础旋转 / 镜像，叠加在用户手动操作之上。</summary>
+    private int _baseRot;
+    private bool _baseFlipH;
+
+    /// <summary>
+    /// 用户对「当前这一张」做过缩放 / 旋转 / 镜像 / 平移就置 true。
+    /// 「放大小图片适应窗口」这类自动策略只在没动过的情况下施加，
+    /// 否则向后翻一页就把用户刚摆好的视图位置顶掉了。
+    /// </summary>
+    private bool _viewTouched;
+
+    // ---- 看图选项（五项开关，见 AppOptions）----
+    private AppOptions _opts = new();
+
+    /// <summary>
+    /// 「不等图片载入」开关用：当前这张的高清解码何时完成的信号量。
+    /// 打开时不 await 它（立即显示已缓存的清晰度），关闭时才等它落定再下一步。
+    /// </summary>
+    private TaskCompletionSource<bool>? _fullTcs;
+
     // ---- 图片元信息 ----
     private int _imgW;
     private int _imgH;
@@ -246,6 +266,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         OnPropertyChanged(nameof(SortDirLabel));
         OnPropertyChanged(nameof(NaturalBackground));
         OnPropertyChanged(nameof(NaturalForeground));
+
+        // 「选项」里的五项开关同样沿用上次设置（缺字段的旧 state.json 会拿到默认全开）
+        _opts = _state.Options ?? new AppOptions();
+        _opts.Push();
+        ApplyScalingMode();
 
         // 启动即回到上次退出的目录 + 照片（后台扫目录，不挡窗口显示）
         _ = AutoRestoreAsync();
@@ -817,9 +842,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // ==================================================================
 
     /// <summary>可用框：旋转 90°/270° 时宽高互换，保证旋转后仍完整落在画布内。</summary>
-    private double FrameW => _rot % 180 != 0 ? CanvasArea.ActualHeight : CanvasArea.ActualWidth;
+    /// <summary>EXIF 方向 + 用户手动旋转的总和（EXIF 那部分每换一张图重新算）。</summary>
+    private int TotalRot => (_baseRot + _rot) % 360;
 
-    private double FrameH => _rot % 180 != 0 ? CanvasArea.ActualWidth : CanvasArea.ActualHeight;
+    /// <summary>EXIF 镜像与用户手动镜像叠加（都是取反，异或即可）。</summary>
+    private bool TotalFlipH => _baseFlipH != _flipH;
+
+    /// <summary>转 90° / 270° 之后可用画布的宽高要互换。</summary>
+    private double FrameW => TotalRot % 180 != 0 ? CanvasArea.ActualHeight : CanvasArea.ActualWidth;
+
+    private double FrameH => TotalRot % 180 != 0 ? CanvasArea.ActualWidth : CanvasArea.ActualHeight;
 
     /// <summary>一个 WPF 逻辑像素（DIP）对应几个物理屏幕像素。</summary>
     private double DpiFactor => Math.Max(1.0, VisualTreeHelper.GetDpi(this).DpiScaleX);
@@ -865,7 +897,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Frame.Width = FrameW;
         Frame.Height = FrameH;
 
-        _mainScale.ScaleX = _zoom * (_flipH ? -1 : 1);
+        _mainScale.ScaleX = _zoom * (TotalFlipH ? -1 : 1);
         _mainScale.ScaleY = _zoom * (_flipV ? -1 : 1);
 
         // 低清占位层与主层用同样的变换（早期版本这里有过对焦呼吸缩放，已移除）
@@ -874,7 +906,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         Matrix m = new();
         m.Translate(_tx, _ty);
-        m.RotateAt(_rot, cw / 2, ch / 2);
+        m.RotateAt(TotalRot, cw / 2, ch / 2);
         Viewport.RenderTransform = new MatrixTransform(m);
     }
 
@@ -886,6 +918,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _rot = 0;
         _flipH = false;
         _flipV = false;
+        _viewTouched = false; // 换图 = 视图归位，「适应 / 小图不放大」这类策略重新生效
         UpdateTransform();
         RefreshImageInfo();
     }
@@ -1036,6 +1069,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void ZoomBy(double factor)
     {
+        _viewTouched = true;
         _zoom = Clamp(_zoom * factor, MinScale, MaxScale);
         UpdateTransform();
         RefreshImageInfo();
@@ -1074,6 +1108,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         _zoom = next;
+        _viewTouched = true;
         UpdateTransform();
         RefreshImageInfo();
         ScheduleRefine();
@@ -1098,6 +1133,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         // 漏掉这一项时，125% 缩放下按 F 得到的其实是 125%（虚胖），且屏幕需求算出
         // 比原图更多的像素，永远解码不到、只能靠 WPF 拉。
         _zoom = Clamp(1 / (f * DpiFactor), MinScale, MaxScale);
+        _viewTouched = true;
         UpdateTransform();
         RefreshImageInfo();
         ScheduleRefine();
@@ -1107,6 +1143,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void RotateBy(int delta)
     {
         _rot = (_rot + delta + 360) % 360;
+        _viewTouched = true;
         UpdateTransform();
         ScheduleRefine();
         Status = $"旋转 {_rot}°";
@@ -1115,6 +1152,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void ToggleFlipH()
     {
         _flipH = !_flipH;
+        _viewTouched = true;
         UpdateTransform();
         Status = _flipH ? "已水平镜像" : "已取消水平镜像";
     }
@@ -1122,6 +1160,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void ToggleFlipV()
     {
         _flipV = !_flipV;
+        _viewTouched = true;
         UpdateTransform();
         Status = _flipV ? "已垂直镜像" : "已取消垂直镜像";
     }
@@ -1150,6 +1189,32 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
+        // 「翻页不等载入」打开（默认）：立刻走。
+        // 关掉：先等上一张的高清解码落地再迈步，连按时会明显感觉到「一档一顿」——
+        // 这就是这一项要关掉的体验。
+        if (_opts.InstantNavigation)
+        {
+            StepTo(delta);
+            return;
+        }
+
+        _ = StepAfterLoadAsync(delta);
+    }
+
+    /// <summary>等当前这张完全载入之后再翻一格。</summary>
+    private async Task StepAfterLoadAsync(int delta)
+    {
+        Task? wait = Volatile.Read(ref _fullTcs)?.Task;
+        if (wait is not null)
+        {
+            await wait.ConfigureAwait(false);
+        }
+
+        await Dispatcher.InvokeAsync(() => StepTo(delta));
+    }
+
+    private void StepTo(int delta)
+    {
         int n = _items.Count;
 
         Perf.Start($"Go {delta}  → 第 {((_cur + delta) % n + n) % n + 1} 张");
@@ -1278,9 +1343,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _imgH = 0;
         RefreshImageInfo();
 
+        BeginFullWait(); // 「翻页不等载入」关闭时靠它串行化
+
         if (idx < 0 || idx >= _items.Count)
         {
             ClearBlur();
+            EndFullWait();
             return;
         }
 
@@ -1322,6 +1390,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// 这张图按当前 zoom / DPI 实际要占多少像素（长边），再留 5% 余量。
     /// 用来判断"缓存里这张够不够看"，够就不必再解全清。
     /// </summary>
+    /// <summary>开始等「当前这张的高清解码」。</summary>
+    private void BeginFullWait()
+    {
+        Interlocked.Exchange(ref _fullTcs,
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously));
+    }
+
+    /// <summary>高清解码到位（或已无望）时放开等待者。</summary>
+    private void EndFullWait()
+    {
+        Interlocked.Exchange(ref _fullTcs, null)?.TrySetResult(true);
+    }
+
     private int ShowNeed(DecodedImage img)
     {
         (int w, int h) = TargetPixelSize(img);
@@ -1337,12 +1418,75 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _viewOwned = img;
         MainImage.Source = img.Source;
         Perf.Tick("MainImage.Source 赋值（位图上传 + 布局失效）");
-        _imgW = img.Width;
-        _imgH = img.Height;
+
+        ApplyExifOrientation(img);   // 必须先于 _imgW/_imgH 与 ApplyFitPolicy
+
+        if (!_viewTouched)
+        {
+            ApplyFitPolicy();        // 这张还没被手动动过 → 自动策略说了算
+        }
+
         UpdateTransform();
         Perf.Tick("UpdateTransform");
         RefreshImageInfo();
         Perf.Tick("RefreshImageInfo");
+    }
+
+    /// <summary>
+    /// 按 EXIF 方向标正画面（关掉该选项或与正方向的图都等于什么也不做）。
+    /// 注意喂出去的 _imgW/_imgH 是**转正之后**的宽高：FitFactor 与信息栏都按这个算，
+    /// 否则竖拍的照片会被当成横向、适应窗口时溢出画布。
+    /// </summary>
+    private void ApplyExifOrientation(DecodedImage img)
+    {
+        if (!_opts.ExifRotate)
+        {
+            _baseRot = 0;
+            _baseFlipH = false;
+            _imgW = img.Width;
+            _imgH = img.Height;
+            return;
+        }
+
+        (int rot, bool flipH) = ExifOrientation.ToTransform(img.ExifOrientation);
+        _baseRot = rot;
+        _baseFlipH = flipH;
+
+        if (ExifOrientation.SwapsAxes(img.ExifOrientation))
+        {
+            _imgW = img.Height;
+            _imgH = img.Width;
+        }
+        else
+        {
+            _imgW = img.Width;
+            _imgH = img.Height;
+        }
+    }
+
+    /// <summary>
+    /// 「放大小图片以适合窗口」没勾时的策略：图比窗口小就按 1:1 显示，不拉伸凑满。
+    /// FitFactor 是「适应窗口时一个图片像素占几个 DIP」，乘上 DPI 才是物理像素；
+    /// 要让一个图片像素正好占一个物理像素，就得来回除回去。
+    /// </summary>
+    private void ApplyFitPolicy()
+    {
+        if (_opts.UpscaleSmallToFit)
+        {
+            return;
+        }
+
+        double f = FitFactor();
+        if (f <= 0)
+        {
+            return;
+        }
+
+        double physical = f * DpiFactor;
+        if (physical > 1.0)
+        {
+            _zoom = 1.0 / physical;
+        }
     }
 
     /// <summary>低清占位：仅在预载未命中时用，与主视图解码并行。</summary>
@@ -1388,6 +1532,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// 停手之后才把当前这张升到全清。
     /// </summary>
     private async Task LoadViewAsync(string path, long token, int delayMs = 0)
+    {
+        try
+        {
+            await LoadViewCoreAsync(path, token, delayMs);
+        }
+        finally
+        {
+            // 无论解出来、解码失败还是中途作废，等待者都要放开，不能再卡着翻页
+            if (token == _curToken)
+            {
+                EndFullWait();
+            }
+        }
+    }
+
+    private async Task LoadViewCoreAsync(string path, long token, int delayMs)
     {
         if (delayMs > 0)
         {
@@ -1658,10 +1818,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return (0, 0);
         }
 
+        (int ew, int eh) = DisplaySize(img);
         double dpi = DpiFactor;
-        int w = (int)Math.Round(img.Width * f * _zoom * dpi);
-        int h = (int)Math.Round(img.Height * f * _zoom * dpi);
+        int w = (int)Math.Round(ew * f * _zoom * dpi);
+        int h = (int)Math.Round(eh * f * _zoom * dpi);
         return (Math.Max(1, w), Math.Max(1, h));
+    }
+
+    /// <summary>
+    /// 画面上看到的宽高 —— EXIF 把横竖换过来的话这里也要跟着换，
+    /// 否则竖拍照片会被按原始（横）尺寸去算重采样目标。
+    /// </summary>
+    private (int W, int H) DisplaySize(DecodedImage img)
+    {
+        bool swap = _opts.ExifRotate && ExifOrientation.SwapsAxes(img.ExifOrientation);
+        return swap ? (img.Height, img.Width) : (img.Width, img.Height);
     }
 
     /// <summary>精修路径的一次性诊断（只写前 6 条），用于确认 GPU 重采样是否真的介入。</summary>
@@ -1682,6 +1853,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void ScheduleRefine()
     {
         if (_viewOwned is null)
+        {
+            return;
+        }
+
+        // 「高品质等比例缩小」关掉：谁也别算，直接让 WPF 带着它的插值上。
+        // 速度更快，代价是缩放比例大时偏软 / 有锯齿。
+        if (!_opts.HighQualityDownscale)
         {
             return;
         }
@@ -1786,8 +1964,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         LowImage.Effect = null;
         if (_imgW <= 0)
         {
-            _imgW = img.Width; // 先让用户看到尺寸，清晰图到了再校正
-            _imgH = img.Height;
+            // 先让用户看到尺寸，清晰图到了再校正（低清图同样要按 EXIF 方向转正）
+            (int ew, int eh) = DisplaySize(img);
+            _imgW = ew;
+            _imgH = eh;
             RefreshImageInfo();
         }
 
@@ -2268,6 +2448,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             _tx = _baseTx + (p.X - _pressX);
             _ty = _baseTy + (p.Y - _pressY);
+            _viewTouched = true;
             UpdateTransform();
         }
     }
@@ -2798,6 +2979,61 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void ActSlide(object sender, RoutedEventArgs e) => ToggleSlide();
     private void ActFull(object sender, RoutedEventArgs e) => SetFull(!_fullscreen);
     private void ActResume(object sender, RoutedEventArgs e) => ResumeLast();
+
+    // ==================================================================
+    // 选项（五项开关）
+    // ==================================================================
+
+    private void ActOptions(object sender, RoutedEventArgs e) => OpenOptions();
+
+    private void OpenOptions()
+    {
+        OptionsWindow dlg = new(_opts)
+        {
+            Owner = this
+        };
+
+        if (dlg.ShowDialog() != true)
+        {
+            return;
+        }
+
+        ApplyOptions();
+        Status = "已保存选项：" + _opts;
+    }
+
+    /// <summary>把新取值推给解码 / 渲染链路，并让改动立刻作用到正在看的那张图。</summary>
+    private void ApplyOptions()
+    {
+        _opts.Push();
+        _state.Options = _opts;
+        _state.Save();
+        ApplyScalingMode();
+
+        // 这些开关改变了「已经解出来的位图」，缓存里的旧结果必须作废，
+        // 否则看到的还是改之前的那版，会误以为选项没生效。
+        _previews.Clear(MainImage.Source, LowImage.Source);
+        GpuImageCache.Instance.Clear();
+
+        if (_cur >= 0 && _cur < _items.Count)
+        {
+            _viewTouched = false; // 让「适应 / 小图不放大」重新算一遍
+            ResetView();
+            ShowPreviewOf(_cur);
+        }
+    }
+
+    /// <summary>
+    /// 「高品质缩小」关掉时连 WPF 自己的插值也降级：这个是最后一道 fallback，
+    /// （GPU 精修被跳过之后剩下的缩放全由它承担），不跟着降就白关了。
+    /// </summary>
+    private void ApplyScalingMode()
+    {
+        RenderOptions.SetBitmapScalingMode(MainImage,
+            _opts.HighQualityDownscale ? BitmapScalingMode.HighQuality : BitmapScalingMode.LowQuality);
+        RenderOptions.SetBitmapScalingMode(LowImage,
+            _opts.HighQualityDownscale ? BitmapScalingMode.HighQuality : BitmapScalingMode.LowQuality);
+    }
 
     /// <summary>
     /// 自检：逐档量化「屏幕要多少像素 vs 手上位图有多少」，写 gpu.log 后退出。

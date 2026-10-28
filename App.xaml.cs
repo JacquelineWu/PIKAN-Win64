@@ -25,6 +25,7 @@ public partial class App : Application
         bool cmp = false;
         bool zoomtest = false;
         bool sorttest = false;
+        bool optselftest = false;
         foreach (string a in e.Args)
         {
             if (string.Equals(a, "--nogpu", StringComparison.OrdinalIgnoreCase))
@@ -80,6 +81,11 @@ public partial class App : Application
                 // 用于确认「自然序」真的把 (11) 排在 (2) 后面
                 sorttest = true;
             }
+            else if (string.Equals(a, "--optselftest", StringComparison.OrdinalIgnoreCase))
+            {
+                // 自检：ICC 色彩管理与 EXIF 方向两项的多半看不见的取值（写 gpu.log）
+                optselftest = true;
+            }
             else if (string.Equals(a, "--nowrap", StringComparison.OrdinalIgnoreCase))
             {
                 // A/B 对照用：预载窗口按线性截断，跨首尾时重新解码一批图
@@ -120,6 +126,13 @@ public partial class App : Application
         if (cmp)
         {
             GpuAccel.WriteLog("cmp: " + CpuResampler.SelfTest(openPath));
+            Shutdown();
+            return;
+        }
+
+        if (optselftest)
+        {
+            GpuAccel.WriteLog(OptionSelfTest.Run(openPath));
             Shutdown();
             return;
         }

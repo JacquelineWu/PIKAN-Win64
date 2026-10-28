@@ -55,6 +55,7 @@
                     <Button Content="选择图片" Style="{StaticResource ToolButton}" Click="ActFiles" />
                     <Button Content="选择文件夹" Style="{StaticResource ToolButton}" Click="ActFolder" />
                     <Button Content="回到上次" Style="{StaticResource ToolButton}" Click="ActResume" />
+                    <Button Content="选项" Style="{StaticResource ToolButton}" Margin="7,3,3,3" Click="ActOptions" />
                     <Button Content="全屏" Style="{StaticResource ToolButton}" Click="ActFull" />
                     <Button Content="{Binding SlideLabel}"
                             Style="{StaticResource ToolButton}"
