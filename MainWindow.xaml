@@ -62,13 +62,6 @@
                             Foreground="{Binding SlideForeground}"
                             Margin="7,3,3,3"
                             Click="ActSlide" />
-                    <Button Content="{Binding GpuLabel}"
-                            Style="{StaticResource ToolButton}"
-                            Background="{Binding GpuBackground}"
-                            Foreground="{Binding GpuForeground}"
-                            Margin="7,3,3,3"
-                            ToolTip="{Binding GpuTip}"
-                            Click="ActGpu" />
                 </StackPanel>
             </Grid>
         </Border>
@@ -88,11 +81,12 @@
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
 
-                    <!-- 列表抬头 -->
-                    <Grid Grid.Row="0" Margin="12,10,12,8">
+                    <!-- 抬头：当前来源 + 张数 -->
+                    <Grid Grid.Row="0" Margin="12,10,12,6">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
@@ -109,11 +103,45 @@
                                    Foreground="#7f88a3" />
                     </Grid>
 
+                    <!-- 当前目录 + 排序控件 -->
+                    <Grid Grid.Row="1" Margin="12,0,12,8">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0"
+                                   Text="{Binding DirLabel}"
+                                   FontSize="11"
+                                   Foreground="#6b7488"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding DirLabel}"
+                                   Margin="0,0,0,6" />
+
+                        <StackPanel Grid.Row="1" Orientation="Horizontal">
+                            <Button Content="{Binding SortDirLabel}"
+                                    Style="{StaticResource SortButton}"
+                                    ToolTip="名称正序 / 倒序切换"
+                                    Click="ActSortDir" />
+                            <Button Content="自然序"
+                                    Style="{StaticResource SortButton}"
+                                    ToolTip="按数字大小排：(1) (2) (11) 而不是 (1) (11) (2)"
+                                    Background="{Binding NaturalBackground}"
+                                    Foreground="{Binding NaturalForeground}"
+                                    Click="ActNatural" />
+                            <Button Content="↑ 上级"
+                                    Style="{StaticResource SortButton}"
+                                    ToolTip="回到上一级目录（退格键同效）"
+                                    IsEnabled="{Binding CanGoUp}"
+                                    Click="ActUpDir" />
+                        </StackPanel>
+                    </Grid>
+
                     <!-- 档案列表：虚拟化，只为屏幕上的几行建节点 -->
                     <ListBox x:Name="FileList"
-                             Grid.Row="1"
+                             Grid.Row="2"
                              Margin="6,0"
-                             ItemsSource="{Binding Items}"
+                             ItemsSource="{Binding Entries}"
                              Background="Transparent"
                              BorderThickness="0"
                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
@@ -122,7 +150,7 @@
                              SelectionChanged="FileList_SelectionChanged">
                         <ListBox.ItemTemplate>
                             <DataTemplate>
-                                <Border Padding="6" CornerRadius="6">
+                                <Border Padding="8,6" CornerRadius="6">
                                     <Border.Style>
                                         <Style TargetType="Border">
                                             <Setter Property="Background" Value="Transparent" />
@@ -134,41 +162,23 @@
                                         </Style>
                                     </Border.Style>
                                     <Grid>
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="56" />
-                                            <ColumnDefinition Width="*" />
-                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
 
-                                        <!-- 缩略图：未就绪时是深灰占位块，绝不按原图分辨率解码 -->
-                                        <Border Grid.Column="0"
-                                                Width="56" Height="42"
-                                                CornerRadius="4"
-                                                Background="#262b34"
-                                                ClipToBounds="True">
-                                            <Border.Style>
-                                                <Style TargetType="Border">
-                                                    <Setter Property="BorderThickness" Value="0" />
-                                                    <Setter Property="BorderBrush" Value="#4fd1c5" />
-                                                    <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
-                                                            <Setter Property="BorderThickness" Value="2" />
-                                                        </DataTrigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </Border.Style>
-                                            <Image Source="{Binding Thumb}" Stretch="UniformToFill" />
-                                        </Border>
-
-                                        <StackPanel Grid.Column="1" Margin="8,0,0,0" VerticalAlignment="Center">
-                                            <TextBlock Text="{Binding Name}"
-                                                       FontSize="12"
-                                                       Foreground="#9fb0c8"
-                                                       TextTrimming="CharacterEllipsis" />
-                                            <StackPanel Orientation="Horizontal" Margin="0,3,0,0">
-                                                <TextBlock Text="{Binding Ext}" FontSize="10" Foreground="#5a6272" Margin="0,0,8,0" />
-                                                <TextBlock Text="{Binding SizeText}" FontSize="10" Foreground="#7f88a8" />
-                                            </StackPanel>
-                                        </StackPanel>
+                                        <!-- 文件名：不显示缩略图，避免为列表格白白解码上千张小图 -->
+                                        <TextBlock Grid.Row="0"
+                                                   Text="{Binding Name}"
+                                                   FontSize="12"
+                                                   Foreground="{Binding NameColor}"
+                                                   FontWeight="{Binding Weight}"
+                                                   TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Row="1"
+                                                   Text="{Binding Detail}"
+                                                   FontSize="10"
+                                                   Foreground="#5a6272"
+                                                   Margin="0,2,0,0" />
                                     </Grid>
                                 </Border>
                             </DataTemplate>
@@ -176,10 +186,9 @@
                         <ListBox.ItemContainerStyle>
                             <Style TargetType="ListBoxItem">
                                 <Setter Property="Padding" Value="0" />
-                                <Setter Property="Margin" Value="0,0,0,4" />
+                                <Setter Property="Margin" Value="0,0,0,2" />
                                 <Setter Property="HorizontalContentAlignment" Value="Stretch" />
                                 <Setter Property="Focusable" Value="False" />
-                                <EventSetter Event="Loaded" Handler="FileItem_Loaded" />
                                 <Setter Property="Template">
                                     <Setter.Value>
                                         <ControlTemplate TargetType="ListBoxItem">
@@ -194,7 +203,7 @@
                     </ListBox>
 
                     <!-- 空态 -->
-                    <StackPanel Grid.Row="1"
+                    <StackPanel Grid.Row="2"
                                 VerticalAlignment="Center"
                                 Margin="16,0"
                                 Visibility="{Binding EmptyVisibility}">

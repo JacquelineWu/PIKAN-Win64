@@ -39,5 +39,12 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        <!-- 左侧排序条用的小号按钮 -->
+        <Style x:Key="SortButton" TargetType="Button" BasedOn="{StaticResource ToolButton}">
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="Height" Value="24" />
+            <Setter Property="Padding" Value="8,0" />
+            <Setter Property="Margin" Value="0,0,4,0" />
+        </Style>
     </Application.Resources>
 </Application>

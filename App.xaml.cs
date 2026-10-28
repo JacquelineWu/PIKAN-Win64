@@ -24,6 +24,7 @@ public partial class App : Application
         bool bench = false;
         bool cmp = false;
         bool zoomtest = false;
+        bool sorttest = false;
         foreach (string a in e.Args)
         {
             if (string.Equals(a, "--nogpu", StringComparison.OrdinalIgnoreCase))
@@ -73,6 +74,12 @@ public partial class App : Application
                 // 自检：逐档检查放大后有没有按规定需求重新取样（写 gpu.log）
                 zoomtest = true;
             }
+            else if (string.Equals(a, "--sorttest", StringComparison.OrdinalIgnoreCase))
+            {
+                // 自检：把某个目录下的名称按四种排序方式排一遍写进 gpu.log，
+                // 用于确认「自然序」真的把 (11) 排在 (2) 后面
+                sorttest = true;
+            }
             else if (string.Equals(a, "--nowrap", StringComparison.OrdinalIgnoreCase))
             {
                 // A/B 对照用：预载窗口按线性截断，跨首尾时重新解码一批图
@@ -113,6 +120,13 @@ public partial class App : Application
         if (cmp)
         {
             GpuAccel.WriteLog("cmp: " + CpuResampler.SelfTest(openPath));
+            Shutdown();
+            return;
+        }
+
+        if (sorttest)
+        {
+            GpuAccel.WriteLog(SortSelfTest.Run(openPath));
             Shutdown();
             return;
         }

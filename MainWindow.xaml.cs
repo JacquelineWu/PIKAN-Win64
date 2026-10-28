@@ -107,6 +107,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private const int SizeYieldMs = 12;
 
     private readonly ObservableCollection<ImageItem> _items = new();
+
+    /// <summary>左侧实际显示的那些行（ .. / 子文件夹 / 图片 ），见 <see cref="FsEntry"/>。</summary>
+    private readonly ObservableCollection<FsEntry> _entries = new();
+
     private readonly PreviewCache _previews = new();
     private readonly HashSet<string> _failed = new(StringComparer.OrdinalIgnoreCase);
 
@@ -119,6 +123,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // ---- 档案 ----
     private string _sourceLabel = "尚未打开";
     private int _cur = -1;
+
+    /// <summary>
+    /// 正在浏览的**单级**目录。为 null 表示当前不是浏览模式
+    /// （例如「打开图库」递归出来的扁平列表，或手工挑选的一批文件），
+    /// 此时左侧没有 .. 也没有子文件夹行。
+    /// </summary>
+    private string? _browseDir;
+
+    // ---- 列表排序 ----
+    private bool _sortDesc;
+    private bool _naturalSort = true;
 
     // ---- 视图变换状态 ----
     private double _zoom = 1;
@@ -225,6 +240,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         ReadLastPos();
 
+        // 列表排序沿用上次的偏好
+        _sortDesc = _state.SortDesc;
+        _naturalSort = _state.NaturalSort;
+        OnPropertyChanged(nameof(SortDirLabel));
+        OnPropertyChanged(nameof(NaturalBackground));
+        OnPropertyChanged(nameof(NaturalForeground));
+
         // 启动即回到上次退出的目录 + 照片（后台扫目录，不挡窗口显示）
         _ = AutoRestoreAsync();
     }
@@ -234,6 +256,34 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // ==================================================================
 
     public ObservableCollection<ImageItem> Items => _items;
+
+    /// <summary>左侧列表的数据源（ .. / 子文件夹 / 图片混在一起）。</summary>
+    public ObservableCollection<FsEntry> Entries => _entries;
+
+    /// <summary>当前目录的完整路径；非浏览模式显示来源说明。</summary>
+    public string DirLabel => _browseDir ?? "（非目录浏览）";
+
+    /// <summary>排序方向按钮上的文案。</summary>
+    public string SortDirLabel => _sortDesc ? "名称 ↓" : "名称 ↑";
+
+    public string NaturalBackground => _naturalSort ? "#4fd1c5" : "#2a2f3a";
+
+    public string NaturalForeground => _naturalSort ? "#101216" : "#e8ecf4";
+
+    /// <summary>「↑ 上级」按钮：只有在浏览模式且不在盘根时才可用。</summary>
+    public bool CanGoUp
+    {
+        get
+        {
+            if (_browseDir is null)
+            {
+                return false;
+            }
+
+            DirectoryInfo? parent = Directory.GetParent(_browseDir.TrimEnd(Path.DirectorySeparatorChar));
+            return parent is not null;
+        }
+    }
 
     public string SourceLabel
     {
@@ -284,14 +334,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // GPU 加速
     // ==================================================================
 
-    public string GpuLabel => GpuResampler.GpuReady ? "CUDA" : "CPU";
-
-    // 界面上一律用 GpuReady / StatusTextReady（不触发 CUDA 初始化）：
-    // 初始化要 1~2 秒，UI 线程同步等它会直接冻结窗口，实测启动那一下卡了 2 秒。
-    public string GpuBackground => GpuResampler.GpuReady ? "#3ddc84" : "#2a2f3a";
-
-    public string GpuForeground => GpuResampler.GpuReady ? "#101216" : "#e8ecf4";
-
     public string GpuLine => "x64 · Windows · " + GpuResampler.StatusTextReady;
 
     /// <summary>状态栏：已预载并缓存的图片张数与占用（含显存常驻部分）。</summary>
@@ -334,9 +376,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private string _cacheLabelShown = "";
 
+    // GPU 的开关从顶栏挪走后，只剩状态栏这行小字还挂着 —— Ctrl+G 仍可切换（排障用）
     public string GpuTip => GpuResampler.GpuReady
-        ? $"GPU 加速已开启\n{GpuAccel.DeviceNameOrEmpty}\n点击切到 CPU 渲染（Ctrl+G）"
-        : $"当前为 CPU 渲染{(GpuAccel.IsReady ? "（已手动关闭 GPU）" : "")}\n点击开启 CUDA 加速（Ctrl+G）";
+        ? $"GPU 加速已开启\n{GpuAccel.DeviceNameOrEmpty}\nCtrl+G 切到 CPU 渲染"
+        : $"当前为 CPU 渲染{(GpuAccel.IsReady ? "（已手动关掉 GPU）" : "")}\nCtrl+G 开启 CUDA 加速";
 
     public string SlideLabel => _playing ? "暂停" : "幻灯片";
     public string SlideBackground => _playing ? "#f6c85f" : "#2a2f3a";
@@ -446,7 +489,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (p.LastKind != "files" && root.Length > 0 && Directory.Exists(root))
             {
                 Status = $"正在恢复上次的目录「{FolderLabel(root)}」…";
-                List<ImageItem>? found = await Task.Run(() => ScanFolder(root));
+
+                // 上次是「打开图库」（递归摊平）就按递归恢复，是浏览模式就恢复单级 + 子文件夹
+                bool recursive = p.LastKind == "gallery";
+                _browseDir = recursive ? null : root;
+                List<ImageItem>? found = await Task.Run(() => ScanFolder(root, recursive));
 
                 // 扫描这几百毫秒里用户可能已经自己开了别的图库，那就别覆盖
                 if (_userLoaded)
@@ -463,6 +510,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     Status = hit >= 0
                         ? $"已回到上次的位置：{found[hit].Name}（第 {hit + 1} / {found.Count} 张 · {FolderLabel(root)}）"
                         : $"已恢复上次的目录（{found.Count} 张 · {FolderLabel(root)}）；上次那张照片已不在，从第 1 张开始";
+                    restored = true;
+                }
+                else
+                {
+                    // 目录还在但图没了：仍然把 .. 与子文件夹列出来，用户可以自己往上走
+                    BuildEntries();
+                    OnPropertyChanged(nameof(DirLabel));
+                    OnPropertyChanged(nameof(CanGoUp));
                     restored = true;
                 }
             }
@@ -491,6 +546,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return false;
         }
 
+        _browseDir = null; // 这批是快照里的文件，不是「正在浏览某个目录」
         ApplyItems(list, _state.LastSrc.Length > 0 ? _state.LastSrc : "上次会话");
         return true;
     }
@@ -639,6 +695,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void ApplyItems(List<ImageItem> list, string src, string capped = "")
     {
         _session++;
+        SortImages(list); // 先排好顺序，_items 与左侧列表的行序才一致
         _items.Clear();
         foreach (ImageItem it in list)
         {
@@ -647,11 +704,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         SourceLabel = src;
         OnPropertyChanged(nameof(CountLabel));
+        OnPropertyChanged(nameof(DirLabel));
+        OnPropertyChanged(nameof(CanGoUp));
 
         // 先算出落点再解码：否则会先按第 1 张解一遍、恢复时又解一遍，白白多一次大图解码
         int start = RestoreIndex(list);
         _cur = list.Count > 0 ? (start >= 0 ? start : 0) : -1;
         ResetView();
+
+        BuildEntries();
 
         if (_cur >= 0)
         {
@@ -731,9 +792,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                             return;
                         }
 
+                        // ImageItem 与左侧 FsEntry 是两份对象，补测到的体积要同步过去，
+                        // 否则列表行会一直停在 '--'
                         foreach ((ImageItem item, long size) in updates)
                         {
                             item.Size = size;
+
+                            int row = EntryIndexOfImage(snapshot.IndexOf(item));
+                            if (row >= 0)
+                            {
+                                _entries[row].Size = size;
+                            }
                         }
                     }, DispatcherPriority.Background);
                 }
@@ -819,6 +888,148 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _flipV = false;
         UpdateTransform();
         RefreshImageInfo();
+    }
+
+    /// <summary>
+    /// 按当前规则（方向 + 是否自然序）给一堆名称排序。
+    /// 目录与图片分开排、然后目录在前——这是资源管理器的惯例，
+    /// 混在一起会让「往下走一层的入口」散落在几百张图片中间。
+    /// </summary>
+    private void SortEntries(List<FsEntry> list)
+    {
+        Comparison<string> cmp = _naturalSort
+            ? NaturalSort.Compare
+            : string.CompareOrdinal;
+
+        int Compare(FsEntry a, FsEntry b)
+        {
+            // .. 永远钉在最上面，不参与排序
+            int upRank = (a.IsUp ? 0 : 1).CompareTo(b.IsUp ? 0 : 1);
+            if (upRank != 0)
+            {
+                return upRank;
+            }
+
+            // 其次：文件夹排在图片前
+            int dirRank = (a.IsFolder ? 0 : 1).CompareTo(b.IsFolder ? 0 : 1);
+            if (dirRank != 0)
+            {
+                return dirRank;
+            }
+
+            int r = cmp(a.Name, b.Name);
+            return _sortDesc ? -r : r;
+        }
+
+        list.Sort(Compare);
+    }
+
+    /// <summary>给「可翻阅的图片序列」排序（就是左侧图片行的那部分，不含目录）。</summary>
+    private void SortImages(List<ImageItem> list)
+    {
+        Comparison<string> cmp = _naturalSort
+            ? NaturalSort.Compare
+            : string.CompareOrdinal;
+
+        list.Sort((a, b) =>
+        {
+            int r = cmp(a.Name, b.Name);
+            return _sortDesc ? -r : r;
+        });
+    }
+
+    /// <summary>
+    /// 依据当前的 <c>_browseDir</c> 与 <c>_items</c> 重建左侧那几行。
+    /// <c>_items</c> 与 <c>_entries</c> 里的图片部分一一对应，靠 <see cref="FsEntry.ItemIndex"/>
+    /// 挂钩，这样翻页 / 预载 / 位置记忆这整套逻辑完全不用动。
+    /// </summary>
+    private void BuildEntries()
+    {
+        _entries.Clear();
+
+        if (_browseDir is not null)
+        {
+            _entries.Add(new FsEntry(_browseDir, FsEntry.EntryKind.Up, ".."));
+
+            foreach (FsEntry d in ListSubdirs(_browseDir))
+            {
+                _entries.Add(d);
+            }
+        }
+
+        for (int i = 0; i < _items.Count; i++)
+        {
+            ImageItem it = _items[i];
+            _entries.Add(new FsEntry(it.Path, FsEntry.EntryKind.Image)
+            {
+                ItemIndex = i,
+                Size = it.Size
+            });
+        }
+
+        List<FsEntry> rows = new(_entries);
+        SortEntries(rows);
+        _entries.Clear();
+        foreach (FsEntry row in rows)
+        {
+            _entries.Add(row);
+        }
+
+        OnPropertyChanged(nameof(CountLabel));
+    }
+
+    /// <summary>列出目录下的直接子文件夹（只一层，不递归）。</summary>
+    private static List<FsEntry> ListSubdirs(string dir)
+    {
+        List<FsEntry> list = new();
+        try
+        {
+            foreach (string sub in Directory.EnumerateDirectories(dir))
+            {
+                FileInfo fi = new(sub);
+                // 跳过系统 / 隐藏目录（System Volume Information、$RECYCLE.BIN 之类），
+                // 它们在资源管理器里也默认不显示，列出来只会干扰
+                if ((fi.Attributes & (FileAttributes.Hidden | FileAttributes.System)) != 0)
+                {
+                    continue;
+                }
+
+                list.Add(new FsEntry(sub, FsEntry.EntryKind.Folder));
+            }
+        }
+        catch
+        {
+            // 没有权限就当作没有子目录
+        }
+
+        return list;
+    }
+
+    /// <summary>把 <c>_items</c> 重排一遍，保持当前这张仍处于选中。</summary>
+    private void Resort()
+    {
+        if (_items.Count == 0)
+        {
+            return;
+        }
+
+        ImageItem? keep = _cur >= 0 && _cur < _items.Count ? _items[_cur] : null;
+
+        List<ImageItem> list = _items.ToList();
+        SortImages(list);
+
+        _items.Clear();
+        foreach (ImageItem it in list)
+        {
+            _items.Add(it);
+        }
+
+        BuildEntries();
+
+        _cur = keep is not null ? Math.Max(0, list.IndexOf(keep)) : 0;
+        UpdateSelection();
+        MarkPos();
+        SchedulePreload();
     }
 
     private static double Clamp(double v, double lo, double hi) => v < lo ? lo : v > hi ? hi : v;
@@ -963,8 +1174,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _suppressSel = true;
         if (_cur >= 0 && _cur < _items.Count)
         {
-            FileList.SelectedIndex = _cur;
-            FileList.ScrollIntoView(FileList.Items[_cur]);
+            // 列表现在是 _entries，_cur 是 _items 的下标，不能直接当 SelectedIndex 用
+            int row = EntryIndexOfImage(_cur);
+            if (row >= 0)
+            {
+                FileList.SelectedIndex = row;
+                FileList.ScrollIntoView(_entries[row]);
+            }
+            else
+            {
+                FileList.SelectedIndex = -1;
+            }
         }
         else
         {
@@ -972,6 +1192,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         _suppressSel = false;
+    }
+
+    /// <summary>图片在 _items 里的下标 → 它在左侧 _entries 里的行号。</summary>
+    private int EntryIndexOfImage(int itemIndex)
+    {
+        for (int i = 0; i < _entries.Count; i++)
+        {
+            if (_entries[i].ItemIndex == itemIndex)
+            {
+                return i;
+            }
+        }
+
+        return -1;
     }
 
     // ==================================================================
@@ -1749,7 +1983,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         if (Directory.Exists(path))
         {
-            _ = LoadFolderAsync(path, "folder");
+            _ = LoadFolderAsync(path, "folder", recursive: false);
             return;
         }
 
@@ -1758,7 +1992,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             string? dir = Path.GetDirectoryName(path);
             if (dir is not null)
             {
-                _ = LoadFolderAsync(dir, "folder", path);
+                _ = LoadFolderAsync(dir, "folder", recursive: false, focusPath: path);
             }
         }
     }
@@ -1773,7 +2007,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        await LoadFolderAsync(root, "gallery");
+        await LoadFolderAsync(root, "gallery", recursive: true);
     }
 
     private void ActFiles(object sender, RoutedEventArgs e)
@@ -1804,6 +2038,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             MarkSource(dir, "files");
         }
 
+        _browseDir = null; // 挑出来的一批散图，左侧不显示 .. 与子文件夹
         ApplyItems(picked, "选择的文件");
     }
 
@@ -1822,18 +2057,28 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        _ = LoadFolderAsync(dlg.SelectedPath, "folder");
+        _ = LoadFolderAsync(dlg.SelectedPath, "folder", recursive: false);
     }
 
-    private async Task LoadFolderAsync(string root, string kind, string? focusPath = null)
+    /// <summary>
+    /// 打开一个目录。<paramref name="recursive"/> 为真时把整棵子树里的图片摊平成一张表
+    /// （「打开图库」是这个模式），为假时只取这一层——子文件夹会作为可进入的行列在左侧，
+    /// 也就是文件浏览器模式。
+    /// </summary>
+    private async Task LoadFolderAsync(string root, string kind, bool recursive, string? focusPath = null)
     {
         _userLoaded = true; // 用户主动开目录：启动时的自动恢复要让路
+        _browseDir = recursive ? null : root; // null ⇒ 左侧不显示 .. 与子文件夹
         Status = "正在扫描文件夹…";
-        List<ImageItem>? found = await Task.Run(() => ScanFolder(root));
+        List<ImageItem>? found = await Task.Run(() => ScanFolder(root, recursive));
 
         if (found is null || found.Count == 0)
         {
             Status = $"「{root}」里没有找到受支持的图片";
+            _browseDir = recursive ? null : root;
+            BuildEntries();
+            OnPropertyChanged(nameof(DirLabel));
+            OnPropertyChanged(nameof(CanGoUp));
             return;
         }
 
@@ -1856,15 +2101,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
-    /// <summary>递归扫描文件夹里的受支持图片，按修改时间倒序（最新在前）。</summary>
-    private static List<ImageItem> ScanFolder(string root)
+    /// <summary>
+    /// 扫出目录里的受支持图片。
+    /// 递归模式下按「修改时间倒序」（鸿蒙版 orderByDesc('date_added') 的对应关系）；
+    /// 单级浏览模式交给 <see cref="SortImages"/> 按名称排——既然要显示文件名，
+    /// 列表顺序就该跟看到的一致，否则方向键翻页的走向和用户眼睛的顺序对不上。
+    /// </summary>
+    private static List<ImageItem> ScanFolder(string root, bool recursive)
     {
         List<(string Path, long Size, DateTime Modified)> found = new();
         try
         {
             EnumerationOptions opt = new()
             {
-                RecurseSubdirectories = true,
+                RecurseSubdirectories = recursive,
                 IgnoreInaccessible = true,
                 AttributesToSkip = FileAttributes.System
             };
@@ -1901,8 +2151,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             // 部分目录不可访问时，返回已经扫到的
         }
 
-        // 最新在前（对应鸿蒙版 orderByDesc('date_added')）
-        found.Sort((a, b) => b.Modified.CompareTo(a.Modified));
+        // 递归摊平才按时间倒序；单级浏览的排序在 ApplyItems 里按名称做
+        if (recursive)
+        {
+            found.Sort((a, b) => b.Modified.CompareTo(a.Modified));
+        }
+
         return found.Select(f => new ImageItem(f.Path) { Size = f.Size }).ToList();
     }
 
@@ -2100,6 +2354,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 ZoomBy(0.8);
                 e.Handled = true;
                 break;
+            case Key.Back:
+                GoUp();
+                e.Handled = true;
+                break;
             case Key.Space:
                 ToggleSlide();
                 e.Handled = true;
@@ -2245,6 +2503,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // 列表 / 拖放 / 按钮
     // ==================================================================
 
+    /// <summary>
+    /// 左侧点一下：图片立刻上右边显示；子文件夹直接进；「..」回上一级。
+    /// 单击（而不是双击）是为了和「点文件名立刻看图」保持一致的手感。
+    /// </summary>
     private void FileList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressSel)
@@ -2252,41 +2514,48 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        if (FileList.SelectedIndex >= 0 && FileList.SelectedIndex != _cur)
+        int i = FileList.SelectedIndex;
+        if (i < 0 || i >= _entries.Count)
         {
-            Select(FileList.SelectedIndex);
+            return;
+        }
+
+        FsEntry row = _entries[i];
+
+        if (row.IsUp)
+        {
+            GoUp();
+            return;
+        }
+
+        if (row.IsFolder)
+        {
+            _ = LoadFolderAsync(row.Path, "folder", recursive: false);
+            return;
+        }
+
+        if (row.ItemIndex >= 0 && row.ItemIndex != _cur)
+        {
+            Select(row.ItemIndex);
         }
     }
 
-    /// <summary>
-    /// 列表行被虚拟化建出来时触发缩略图请求 —— 等价于鸿蒙版 ArchiveRow.aboutToAppear。
-    /// 只有屏幕上的这几行会走到这里，几百张图也不会一次性排队解码。
-    /// </summary>
-    private void FileItem_Loaded(object sender, RoutedEventArgs e)
+    /// <summary>回到上一级目录。</summary>
+    private void GoUp()
     {
-        if (sender is not ListBoxItem li || li.DataContext is not ImageItem item)
+        if (_browseDir is null)
         {
             return;
         }
 
-        BitmapSource? hit = ThumbLoader.Get().Peek(item.Path);
-        if (hit is not null)
+        DirectoryInfo? parent = Directory.GetParent(_browseDir.TrimEnd(Path.DirectorySeparatorChar));
+        if (parent is null)
         {
-            item.Thumb = hit;
+            Status = "已经是盘符根目录";
             return;
         }
 
-        long session = _session;
-        ThumbLoader.Get().Request(item.Path, () => session == _session, bmp =>
-        {
-            _ = Dispatcher.BeginInvoke(new Action(() =>
-            {
-                if (session == _session && bmp is not null)
-                {
-                    item.Thumb = bmp;
-                }
-            }), DispatcherPriority.Background);
-        });
+        _ = LoadFolderAsync(parent.FullName, "folder", recursive: false);
     }
 
     private void Window_DragOver(object sender, DragEventArgs e)
@@ -2311,7 +2580,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         string first = paths[0];
         if (Directory.Exists(first))
         {
-            _ = LoadFolderAsync(first, "folder");
+            _ = LoadFolderAsync(first, "folder", recursive: false);
             return;
         }
 
@@ -2326,6 +2595,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         _userLoaded = true;
         _sessionRoot = ""; // 散文件没有统一目录：别拿第一个文件的目录去覆盖记忆
+        _browseDir = null;
         ApplyItems(list, "拖放的文件");
     }
 
@@ -2488,11 +2758,41 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void RefreshGpu()
     {
-        OnPropertyChanged(nameof(GpuLabel));
-        OnPropertyChanged(nameof(GpuBackground));
-        OnPropertyChanged(nameof(GpuForeground));
+        // 按钮已经在顶栏去掉了，这里只需要刷新状态栏那行 GPU 说明。
+        // 注意用 GpuReady 而非触初始化的版本：CUDA 起来要 1~2 秒，
+        // UI 线程同步等它会直接冻结窗口（实测启动那一下会卡 2 秒）。
         OnPropertyChanged(nameof(GpuLine));
-        OnPropertyChanged(nameof(GpuTip));
+    }
+
+    private void ActSortDir(object sender, RoutedEventArgs e)
+    {
+        _sortDesc = !_sortDesc;
+        OnPropertyChanged(nameof(SortDirLabel));
+        Resort();
+        SaveSortPref();
+        Status = "列表按名称" + (_sortDesc ? "倒序" : "正序") + (_naturalSort ? "（自然序）" : "");
+    }
+
+    private void ActNatural(object sender, RoutedEventArgs e)
+    {
+        _naturalSort = !_naturalSort;
+        OnPropertyChanged(nameof(NaturalBackground));
+        OnPropertyChanged(nameof(NaturalForeground));
+        Resort();
+        SaveSortPref();
+        Status = _naturalSort
+            ? "已按自然序排列：(1) (2) (10) (11) 这种数字会按大小排"
+            : "已按逐字符排列：(1) (11) (2) 这种数字按字符排";
+    }
+
+    private void ActUpDir(object sender, RoutedEventArgs e) => GoUp();
+
+    /// <summary>排序偏好写进状态文件，下次打开还在。</summary>
+    private void SaveSortPref()
+    {
+        _state.SortDesc = _sortDesc;
+        _state.NaturalSort = _naturalSort;
+        _state.Save();
     }
 
     private void ActSlide(object sender, RoutedEventArgs e) => ToggleSlide();

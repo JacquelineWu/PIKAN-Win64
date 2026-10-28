@@ -9,9 +9,10 @@
 界面布局与鸿蒙版一致（ACDSee 风格）：
 
 - **顶栏**：标题 + 当前文件名 + 打开图库 / 选择图片 / 选择文件夹 / 回到上次 / 全屏 / 幻灯片
-- **左侧**：图像档案列表（缩略图 + 文件名 + 格式 + 体积），虚拟化滚动、点击切换（占满左侧整列高度）
+- **左侧**：**文件浏览器**（纯文件名列表，不显示缩略图）—— 顶上「..」回上级，中间是当前目录的子文件夹，
+  再往下是这一层的图片；点图片右侧立刻显示，点文件夹就进到那一层。带排序控件
 - **右侧**：大图预览区（深色背景），左上角信息浮层 + 右下角缩放角标
-- **底栏**：状态栏
+- **底栏**：状态栏（含 GPU 状态一行；CUDA 开关按钮已取消，需要时用 `Ctrl + G` 切换）
 
 ## 功能
 
@@ -29,10 +30,13 @@
 | 复位 | **双击画布** / 键盘 `0`（回到适应窗口） |
 | 1:1 | 键盘 `F`（一个图片像素对应一个屏幕**物理**像素，显示正好 100%） |
 | 幻灯片 | `幻灯片` 按钮 / 空格键，默认 3 秒切换 |
+| 列表浏览 | 左侧是文件浏览器：**点文件名右边立刻显示**，点子文件夹进去，「..」或 `退格` 回上级 |
+| 列表排序 | 面板上有两个开关：**名称正序 / 倒序**，以及**自然序**（默认开）。<br>自然序按数字大小排：`IMG_1 IMG_2 IMG_10 IMG_20`、`照片 (1) (2) (3) (11)`；<br>关掉则逐字符排：`IMG_1 IMG_10 IMG_2 IMG_20`、`照片 (1) (11) (2)`。排序偏好会记进状态文件 |
 | 键盘翻页 | `←` `→` 上一张/下一张 |
+| 返回上级 | `退格`（等同点列表里的「..」） |
 | 关闭应用 | **`Esc`**（非全屏时；全屏下 `Esc` 先退全屏，再按一次才关闭） |
-| 来源 | `打开图库`（递归扫描「图片」库）/ `选择图片`（多选文件）/ `选择文件夹` / **拖放文件或文件夹** / **命令行传参** |
-| 性能 | 列表虚拟化 + 128px 缩略图 LRU 缓存（限并发 3）；主视图按「画布长边 × 2」降采样解码 |
+| 来源 | `打开图库`（递归扫「图片」库，摊平成一张表）/ `选择图片`（多选文件）/ `选择文件夹`（进入该目录浏览）/ **拖放文件或文件夹** / **命令行传参** |
+| 性能 | 列表虚拟化、**不生成缩略图**（以前要为每个文件解一张 128px 小图，列表才动一下就几百个请求）；主视图按屏幕需求降采样解码 |
 | 后台预载 | 自动预解码当前位置**前后各 20 张**（按画布尺寸取 1024–1280px 档位，直接可显示），窗口随位置滑动，**翻页不等解码** |
 | 切图过渡 | **无动画**：命中预载就直接显示该图；未命中才先用 768px 低清占位，清晰图到达后瞬时替换 |
 | 位置记忆 | 退出时存下「**浏览目录** + 停在第几张 + 图片列表快照」，`%LOCALAPPDATA%\PIKAN\state.json`；下次打开**自动重扫该目录并回到同一张**（顶栏「回到上次」可随时手动跳） |
@@ -358,8 +362,10 @@ CUDA 不可用（无 NVIDIA 卡 / 驱动太旧 / PTX 加载失败）时**不降�
 - 启动参数 `--nogpupref` 禁止程序自动向 Windows 图形首选项申请高性能 GPU
 - 启动参数 `--cmp <图片或目录>` 自检：同一张图分别用 GPU / CPU / WIC 重采样，
   比对逐字节差异与耗时，结果写进 `gpu.log` 后退出（不弹窗口）
-- 启动参数 `--zoomtest <图片>` 自检：逐档（适应 / 200% / 400% / 1:1）打印
+- 启动参数 `--zoomtest <图片>` 自检：逐档（适应 / 25% / 100% / 200% / 400%）打印
   「屏幕需要多少像素 vs 手上位图有多少」，拉伸比 > 1 就是会糊，写 `gpu.log` 后退出
+- 启动参数 `--sorttest <目录>` 自检：把这个目录下的名称按「逐字符/自然序 × 正序/倒序」
+  四种方式各排一遍写进 `gpu.log` 后退出，用来确认 `(1) (2) (11)` 到底排对了没有
 - 诊断日志写在 `%LOCALAPPDATA%\PIKAN\gpu.log`（只记初始化与异常，正常路径几乎不写盘）
 
 > 一个坑：CUDA 初始化要 1~2 秒。凡是**界面上**读 GPU 状态的地方都用
@@ -378,11 +384,12 @@ PIKAN-Win64/
 ├── App.xaml / .cs            启动 + 命令行参数（PIKAN.exe <图片 或 文件夹> [--nogpu]）
 ├── MainWindow.xaml           ACDSee 三段式布局（顶栏 / 主体 / 状态栏）
 ├── MainWindow.xaml.cs        全部 UI 与交互逻辑
-├── ImageItem.cs              列表项（路径 / 文件名 / 体积 / 缩略图，INotifyPropertyChanged）
+├── ImageItem.cs              可翻阅的图片项（路径 / 文件名 / 体积，INotifyPropertyChanged）
+├── FsEntry.cs                左侧列表的一行：上级目录 / 子文件夹 / 图片，含 ItemIndex 与 ImageItem 挂钩
+├── SortSelfTest.cs           `--sorttest <目录>`：把名称按四种排序方式各排一遍写进 gpu.log
 ├── Decoder.cs                WIC 解码：Probe 原始尺寸 + 按长边降采样解码 + Freeze
-├── ThumbLoader.cs            缩略图 LRU（600 张）+ 限并发（3）+ 限队列（240）
 ├── PreviewCache.cs           低清预览 LRU（48 张 / 96MB）+ 跟随位置的窗口淘汰
-├── StateStore.cs             位置记忆 + 列表快照 → %LOCALAPPDATA%\PIKAN\state.json
+├── StateStore.cs             位置记忆 + 列表快照 + 排序偏好 → %LOCALAPPDATA%\PIKAN\state.json
 ├── GpuAccel.cs               CUDA Driver API：上下文 / PTX JIT / kernel 调度 / 缓冲复用
 ├── GpuImageCache.cs          显存常驻缓存：预载图常驻显存 + 配额（默认 50% 总显存）+ LRU
 ├── GpuResampler.cs           BitmapSource ↔ GPU 桥接 + 结果缓存 + CPU / WIC 回落
@@ -406,7 +413,7 @@ PIKAN-Win64/
 | 外 `Column.rotate/translate` | `Viewport.RenderTransform = MatrixTransform`（**先旋转后平移**，平移量不被旋转带偏） |
 | 内 `Image.scale` | `ScaleTransform`（zoom × 镜像方向） |
 | `objectFit: Contain` | `Stretch="Uniform"` |
-| `LazyForEach` | `ListBox` + `VirtualizingStackPanel`，容器 `Loaded` 触发缩略图请求 |
+| `LazyForEach` | `ListBox` + `VirtualizingStackPanel`（列表只建屏幕上的那几行的节点，不产出缩略图） |
 | `preferences` | `%LOCALAPPDATA%\PIKAN\state.json`（`System.Text.Json`） |
 | `PhotoViewPicker`（图库） | 递归扫描「图片」文件夹，按修改时间倒序（Windows 没有图库 ContentProvider） |
 | `DocumentViewPicker` | `Microsoft.Win32.OpenFileDialog` |

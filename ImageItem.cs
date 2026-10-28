@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.IO;
-using System.Windows.Media.Imaging;
 
 namespace PIKAN;
 
@@ -10,12 +9,11 @@ namespace PIKAN;
 /// 与鸿蒙版 ArchiveRow 的对应关系：
 ///   uri  → Path（Windows 下就是普通文件路径，不再有 content:// 之类 URI）
 ///   size → Size（-1 表示未知，由后台 fillSizes 分批补测）
-///   thumb→ Thumb（缩略图解码完成后回填，走 INotifyPropertyChanged 只刷这一行）
+///   thumb→ 已移除：左侧列表现在只显示文件名 + 一行小字（类型 / 体积），不再显示缩略图
 /// </summary>
 public sealed class ImageItem : INotifyPropertyChanged
 {
     private long _size = -1;
-    private BitmapSource? _thumb;
 
     public ImageItem(string path, string? name = null)
     {
@@ -47,22 +45,6 @@ public sealed class ImageItem : INotifyPropertyChanged
             _size = value;
             OnPropertyChanged(nameof(Size));
             OnPropertyChanged(nameof(SizeText));
-        }
-    }
-
-    /// <summary>列表缩略图；未就绪为 null（此时显示深灰占位块，绝不按原图分辨率解码）。</summary>
-    public BitmapSource? Thumb
-    {
-        get => _thumb;
-        set
-        {
-            if (ReferenceEquals(_thumb, value))
-            {
-                return;
-            }
-
-            _thumb = value;
-            OnPropertyChanged(nameof(Thumb));
         }
     }
 

@@ -47,6 +47,12 @@ public sealed class AppState
     /// <summary>上次会话的图片列表快照（供「回到上次」在换源后仍能复原）。</summary>
     public List<string> Snapshot { get; set; } = new();
 
+    /// <summary>档案列表是否倒序（false = 名称从 A 到 Z）。</summary>
+    public bool SortDesc { get; set; }
+
+    /// <summary>是否按自然序（一开就是 true：(1) (2) (11) 而不是 (1) (11) (2)）。</summary>
+    public bool NaturalSort { get; set; } = true;
+
     private static string FilePath
     {
         get
