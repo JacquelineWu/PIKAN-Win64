@@ -40,6 +40,12 @@ public sealed class FsEntry : INotifyPropertyChanged
         /// <summary>当前目录下的子文件夹，点进去就换到那个目录继续浏览。</summary>
         Folder,
 
+        /// <summary>
+        /// 当前目录下**不支持预览**的文件（txt / mov / psd …）。
+        /// 只占一个名字让人知道「它在那儿」，点它最多给一句提示，不进翻页序列。
+        /// </summary>
+        File,
+
         /// <summary>当前目录下的图片，点一下右边立刻显示。</summary>
         Image
     }
@@ -69,6 +75,9 @@ public sealed class FsEntry : INotifyPropertyChanged
     public bool IsFolder => Kind == EntryKind.Folder;
 
     public bool IsImage => Kind == EntryKind.Image;
+
+    /// <summary>不支持预览的普通文件（灰色那些行）。</summary>
+    public bool IsFile => Kind == EntryKind.File;
 
     /// <summary>对应 <c>_items</c> 中的下标； .. 与子文件夹为 -1。</summary>
     public int ItemIndex { get; set; } = -1;
@@ -130,11 +139,20 @@ public sealed class FsEntry : INotifyPropertyChanged
     /// <summary>「日期」一列：年-月-日 时:分，未测到留空。</summary>
     public string DateText => _modified is { } m ? m.ToString("yyyy-MM-dd HH:mm") : "";
 
-    /// <summary>文件名颜色：目录/上级用青蓝，图片用常规灰，一眼就分得开。</summary>
-    public string NameColor => IsImage ? "#9fb0c8" : "#6fd3cb";
+    /// <summary>
+    /// 文件名颜色，一眼分清三种行：
+    /// 可预览的图 → 粉色；不支持预览的文件 → 灰色（退到背景里，但仍看得见）；
+    /// 目录（含「..」）→ 粉蓝。
+    /// </summary>
+    public string NameColor => Kind switch
+    {
+        EntryKind.Image => "#f9a8c8", // 粉
+        EntryKind.File => "#6b7280",  // 灰
+        _ => "#8fd2f2"                // 粉蓝
+    };
 
-    /// <summary>是否加粗（ .. 与子文件夹加粗，图片常规）。</summary>
-    public FontWeight Weight => IsImage ? FontWeights.Normal : FontWeights.SemiBold;
+    /// <summary>是否加粗（ .. 与子文件夹加粗，文件常规）。</summary>
+    public FontWeight Weight => IsFolder || IsUp ? FontWeights.SemiBold : FontWeights.Normal;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 

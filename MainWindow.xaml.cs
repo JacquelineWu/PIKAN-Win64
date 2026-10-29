@@ -103,6 +103,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private const int SlideIntervalMs = 3000;
     private const long PosSaveMs = 500;
     private const int ScanCap = 20000;
+
+    /// <summary>左栏最多列多少个「不支持预览」的文件，防止一个杂项目录把列表撑爆。</summary>
+    private const int OtherFilesCap = 2000;
     private const int SizeChunk = 60;
     private const int SizeYieldMs = 12;
 
@@ -265,6 +268,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     /// <summary>目录容量求和的序号：换目录后旧的那批结果就别回填了。</summary>
     private long _folderSizeSeq;
+
+    /// <summary>当前目录里不支持预览的文件（左栏灰色行），换目录时整批替换。</summary>
+    private List<FsEntry> _others = new();
 
     /// <summary>正在扫描新目录：此时左侧只出「..」与本层子文件夹，不出图片行。</summary>
     private bool _listing;
@@ -698,7 +704,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 // 上次是「打开图库」（递归摊平）就按递归恢复，是浏览模式就恢复单级 + 子文件夹
                 bool recursive = p.LastKind == "gallery";
                 _browseDir = recursive ? null : root;
-                List<ImageItem>? found = await Task.Run(() => ScanFolder(root, recursive));
+                ScanResult scan = await Task.Run(() => ScanFolder(root, recursive));
 
                 // 扫描这几百毫秒里用户可能已经自己开了别的图库，那就别覆盖
                 if (_userLoaded)
@@ -706,23 +712,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     return;
                 }
 
-                if (found is { Count: > 0 })
+                if (scan.Images.Count > 0)
                 {
                     MarkSource(root, p.LastKind);
-                    int hit = RestoreIndex(found);
-                    ApplyItems(found, FolderLabel(root));
+                    int hit = RestoreIndex(scan.Images);
+                    ApplyItems(scan.Images, FolderLabel(root), "", scan.Others);
 
                     Status = hit >= 0
-                        ? $"已回到上次的位置：{found[hit].Name}（第 {hit + 1} / {found.Count} 张 · {FolderLabel(root)}）"
-                        : $"已恢复上次的目录（{found.Count} 张 · {FolderLabel(root)}）；上次那张照片已不在，从第 1 张开始";
+                        ? $"已回到上次的位置：{scan.Images[hit].Name}（第 {hit + 1} / {scan.Images.Count} 张 · {FolderLabel(root)}）"
+                        : $"已恢复上次的目录（{scan.Images.Count} 张 · {FolderLabel(root)}）；上次那张照片已不在，从第 1 张开始";
                     restored = true;
                 }
                 else
                 {
-                    // 目录还在但图没了：仍然把 .. 与子文件夹列出来，用户可以自己往上走
-                    BuildEntries();
-                    OnPropertyChanged(nameof(DirLabel));
-                    OnPropertyChanged(nameof(CanGoUp));
+                    // 目录还在但图没了：仍然把 .. 与子文件夹（以及灰行）列出来，用户可以自己往上走
+                    ApplyItems(new List<ImageItem>(), FolderLabel(root), "", scan.Others);
+                    Status = $"上次的目录还在，但里面没有可预览的图片（{FolderLabel(root)}）";
                     restored = true;
                 }
             }
@@ -902,9 +907,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private static long TrySize(string path) => TryStat(path).Size;
 
     /// <summary>统一入口：提交档案列表、刷新计数、重建预览与预载。</summary>
-    private void ApplyItems(List<ImageItem> list, string src, string capped = "")
+    /// <param name="others">
+    /// 同一层里不支持预览的文件（只在浏览器模式下列出来）；传 null 表示这次没有目录上下文，
+    /// 左侧的灰色行要清空，别把上一个目录的文件留在新列表里。
+    /// </param>
+    private void ApplyItems(List<ImageItem> list, string src, string capped = "", List<FsEntry>? others = null)
     {
         _session++;
+        _others = others ?? new List<FsEntry>();
         SortImages(list); // 先排好顺序，_items 与左侧列表的行序才一致
         _items.Clear();
         foreach (ImageItem it in list)
@@ -1208,6 +1218,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     Size = it.Size,
                     Modified = it.Modified
                 });
+            }
+
+            // 不支持预览的文件也列出来（灰色、点了只提示一句）：只在本层浏览时给，
+            // 图库（递归摊平）模式下没有「这一层」的概念，混进来只会碍眼
+            if (_browseDir is not null)
+            {
+                foreach (FsEntry f in _others)
+                {
+                    _entries.Add(f);
+                }
             }
         }
 
@@ -2564,7 +2584,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         FileList.SelectedIndex = -1;
         Status = "正在扫描文件夹…";
 
-        List<ImageItem>? found = await Task.Run(() => ScanFolder(root, recursive));
+        ScanResult scan = await Task.Run(() => ScanFolder(root, recursive));
 
         if (seq != _navSeq)
         {
@@ -2574,20 +2594,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         _listing = false;
 
-        if (found is null || found.Count == 0)
+        if (scan.Images.Count == 0)
         {
             // 列表已经换成新目录了，_items 也得跟着清空，否则方向键还能翻到上一层的图。
             // ApplyItems 会写「已载入 0 张」，所以空目录的提示要放在它之后。
-            ApplyItems(new List<ImageItem>(), FolderLabel(root));
-            Status = $"「{root}」里没有找到受支持的图片";
+            ApplyItems(new List<ImageItem>(), FolderLabel(root), "", scan.Others);
+            Status = scan.Others.Count > 0
+                ? $"「{root}」里没有可预览的图片（另外 {scan.Others.Count} 个文件只能显示名字）"
+                : $"「{root}」里没有找到受支持的图片";
             return;
         }
 
         // 记下来源：下次启动自动回到这里。成功才记，扫空了别把上次的目录冲掉。
         MarkSource(root, kind);
 
-        string capped = found.Count >= ScanCap ? $"（已按 {ScanCap} 张截断）" : "";
-        ApplyItems(found, FolderLabel(root), capped);
+        string capped = scan.Images.Count >= ScanCap ? $"（已按 {ScanCap} 张截断）" : "";
+        ApplyItems(scan.Images, FolderLabel(root), capped, scan.Others);
 
         if (focusPath is not null)
         {
@@ -2602,15 +2624,24 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    /// <summary>一次扫描的产出：可翻页的图片 + 本层不支持预览的文件（后者只在浏览器模式有）。</summary>
+    private sealed class ScanResult
+    {
+        public List<ImageItem> Images { get; } = new();
+
+        public List<FsEntry> Others { get; } = new();
+    }
+
     /// <summary>
     /// 扫出目录里的受支持图片。
     /// 递归模式下按「修改时间倒序」（鸿蒙版 orderByDesc('date_added') 的对应关系）；
     /// 单级浏览模式交给 <see cref="SortImages"/> 按名称排——既然要显示文件名，
     /// 列表顺序就该跟看到的一致，否则方向键翻页的走向和用户眼睛的顺序对不上。
     /// </summary>
-    private static List<ImageItem> ScanFolder(string root, bool recursive)
+    private static ScanResult ScanFolder(string root, bool recursive)
     {
         List<(string Path, long Size, DateTime Modified)> found = new();
+        ScanResult result = new();
         try
         {
             EnumerationOptions opt = new()
@@ -2622,11 +2653,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
             foreach (string path in Directory.EnumerateFiles(root, "*", opt))
             {
-                if (!Decoder.IsImage(path))
-                {
-                    continue;
-                }
-
                 long size = -1;
                 DateTime modified = DateTime.MinValue;
                 try
@@ -2638,6 +2664,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 catch
                 {
                     // 取不到就留给后台补测
+                }
+
+                if (!Decoder.IsImage(path))
+                {
+                    // 不支持预览的文件：本层浏览时列在左栏显灰，图库模式的摊平表里不要
+                    if (!recursive && result.Others.Count < OtherFilesCap)
+                    {
+                        result.Others.Add(new FsEntry(path, FsEntry.EntryKind.File)
+                        {
+                            Size = size,
+                            Modified = modified
+                        });
+                    }
+
+                    continue;
                 }
 
                 found.Add((path, size, modified));
@@ -2658,7 +2699,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             found.Sort((a, b) => b.Modified.CompareTo(a.Modified));
         }
 
-        return found.Select(f => new ImageItem(f.Path) { Size = f.Size }).ToList();
+        result.Images.AddRange(found.Select(f => new ImageItem(f.Path) { Size = f.Size }));
+        return result;
     }
 
     // ==================================================================
@@ -3121,6 +3163,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (row.IsFolder)
         {
             _ = LoadFolderAsync(row.Path, "folder", recursive: false);
+            return;
+        }
+
+        if (row.IsFile)
+        {
+            // 灰色行只是让人看见「这儿还有这么个文件」，点了给一句提示就够
+            Status = $"「{row.Name}」不是可预览的图片格式";
             return;
         }
 
