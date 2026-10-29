@@ -272,7 +272,7 @@
                                FontSize="64"
                                Foreground="#2a2f3a"
                                HorizontalAlignment="Center" />
-                    <TextBlock Text="滚轮切换上一张 / 下一张"
+                    <TextBlock Text="滚轮 / ↑ ↓ ← → 切换上一张 / 下一张"
                                FontSize="13"
                                Foreground="#5a6272"
                                HorizontalAlignment="Center"
@@ -282,7 +282,7 @@
                                Foreground="#454c5a"
                                HorizontalAlignment="Center"
                                Margin="0,6,0,0" />
-                    <TextBlock Text="双击复位 · Ctrl + 滚轮缩放 · F11 全屏"
+                    <TextBlock Text="双击复位 · Ctrl + 滚轮 / + − 缩放 · F11 全屏"
                                FontSize="11"
                                Foreground="#454c5a"
                                HorizontalAlignment="Center"

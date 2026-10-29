@@ -2894,21 +2894,45 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
         }
 
+        // Ctrl + ↑/↓ 仍留给缩放：↑↓ 的正职已经是翻页了，老习惯总得有地方放
+        if ((Keyboard.Modifiers & ModifierKeys.Control) != 0 &&
+            (e.Key == Key.Up || e.Key == Key.Down))
+        {
+            ZoomBy(e.Key == Key.Up ? 1.25 : 0.8);
+            e.Handled = true;
+            return;
+        }
+
         switch (e.Key)
         {
+            // 四个方向键都用来翻页：左/上 = 上一张，右/下 = 下一张
             case Key.Left:
+            case Key.Up:
                 Go(-1);
                 e.Handled = true;
                 break;
             case Key.Right:
+            case Key.Down:
                 Go(1);
                 e.Handled = true;
                 break;
-            case Key.Up:
+            case Key.PageUp:
+                Go(-1);
+                e.Handled = true;
+                break;
+            case Key.PageDown:
+                Go(1);
+                e.Handled = true;
+                break;
+
+            // 缩放改到这里：+/−（含小键盘），Ctrl+↑↓ 见上面
+            case Key.OemPlus:
+            case Key.Add:
                 ZoomBy(1.25);
                 e.Handled = true;
                 break;
-            case Key.Down:
+            case Key.OemMinus:
+            case Key.Subtract:
                 ZoomBy(0.8);
                 e.Handled = true;
                 break;
