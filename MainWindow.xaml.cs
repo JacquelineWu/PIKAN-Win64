@@ -225,7 +225,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>用户自己已经开过图库/文件夹/文件；启动时的自动恢复要让路。</summary>
     private bool _userLoaded;
 
-    private bool _suppressSel;
     private bool _pendingReload;
 
     private WindowState _prevWindowState = WindowState.Maximized;
@@ -238,6 +237,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         InitializeComponent();
 
         DataContext = this;
+
 
         // 先探一次 GPU：CUDA 上下文创建 + PTX JIT 有几十毫秒开销，放在启动时做，
         // 避免第一次切图才初始化导致卡顿。失败也只是安静降级。
@@ -1237,7 +1237,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void UpdateSelection()
     {
-        _suppressSel = true;
         if (_cur >= 0 && _cur < _items.Count)
         {
             // 列表现在是 _entries，_cur 是 _items 的下标，不能直接当 SelectedIndex 用
@@ -1256,8 +1255,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             FileList.SelectedIndex = -1;
         }
-
-        _suppressSel = false;
     }
 
     /// <summary>图片在 _items 里的下标 → 它在左侧 _entries 里的行号。</summary>
@@ -2701,11 +2698,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// </summary>
     private void FileList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_suppressSel)
-        {
-            return;
-        }
-
+        // 不用「全局静默窗口」防回环（那种 bool 开关一旦在异步落地窗口期遇到用户点击，
+        // 就会把一次真实点选静默吞掉），改判幂等：程序化把 SelectedIndex 设成 _cur 对应行时，
+        // 这里 row.ItemIndex == _cur 自然走不到 Select；用户点别的行则一定生效。
         int i = FileList.SelectedIndex;
         if (i < 0 || i >= _entries.Count)
         {
