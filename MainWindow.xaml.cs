@@ -170,6 +170,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     // ---- 交互 ----
     private bool _fullscreen;
+
+    /// <summary>顶栏热区高度（相对窗口顶部，单位与布局一致的 1/96 英寸）。
+    /// 比顶栏自身的 52 高一截，鼠标停在栏下方一点点也不会立刻消失。</summary>
+    private const double TopBarHotZone = 64;
+
+    private bool _topHover;
     private bool _playing;
     private string _status = "点顶栏「打开图库」扫描图片库，或「选择图片」挑文件";
     private string _resumeHint = "";
@@ -412,6 +418,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public string SlideForeground => _playing ? "#101216" : "#e8ecf4";
 
     public Visibility ChromeVisibility => _fullscreen ? Visibility.Collapsed : Visibility.Visible;
+
+    /// <summary>顶栏：只在鼠标贴近窗口顶部时浮出，其余时间隐藏。</summary>
+    public Visibility TopBarVisibility => _topHover ? Visibility.Visible : Visibility.Collapsed;
+
     public Visibility FullscreenVisibility => _fullscreen ? Visibility.Visible : Visibility.Collapsed;
     public Visibility EmptyVisibility => _cur >= 0 ? Visibility.Collapsed : Visibility.Visible;
     public Visibility HasImageView => _cur >= 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -2483,6 +2493,28 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             ResetView();
             Status = "已适应窗口";
         }
+    }
+
+    /// <summary>鼠标进入窗口顶部热区 → 浮出顶栏；离开这块或移出窗口 → 收起。</summary>
+    private void Window_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        SetTopHover(e.GetPosition(this).Y <= TopBarHotZone);
+    }
+
+    private void Window_MouseLeave(object sender, MouseEventArgs e)
+    {
+        SetTopHover(false);
+    }
+
+    private void SetTopHover(bool near)
+    {
+        if (_topHover == near)
+        {
+            return;
+        }
+
+        _topHover = near;
+        OnPropertyChanged(nameof(TopBarVisibility));
     }
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)

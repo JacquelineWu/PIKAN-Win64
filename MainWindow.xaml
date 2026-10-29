@@ -10,6 +10,8 @@
         FontFamily="Segoe UI"
         AllowDrop="True"
         PreviewKeyDown="Window_PreviewKeyDown"
+        PreviewMouseMove="Window_PreviewMouseMove"
+        MouseLeave="Window_MouseLeave"
         Closing="Window_Closing"
         Drop="Window_Drop"
         DragOver="Window_DragOver"
@@ -17,58 +19,14 @@
 
     <Grid SnapsToDevicePixels="True">
         <Grid.RowDefinitions>
-            <!-- 顶栏 -->
-            <RowDefinition Height="Auto" />
-            <!-- 主体 -->
+            <!-- 主体（顶栏已改成浮层，不再占一行：显隐时图片不会跟着上下跳） -->
             <RowDefinition Height="*" />
             <!-- 状态栏 -->
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- ===================== 顶栏（全屏时整条隐藏）===================== -->
-        <Border Grid.Row="0"
-                Height="52"
-                Background="#1a1d23"
-                BorderBrush="#2a2f3a"
-                BorderThickness="0,0,0,1"
-                Padding="16,0,12,0"
-                Visibility="{Binding ChromeVisibility}">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-
-                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-                    <TextBlock Text="PIKAN" FontSize="16" FontWeight="Bold" Foreground="#f2f5fa" />
-                    <TextBlock Text="·" FontSize="14" Foreground="#4a5262" Margin="8,0" />
-                    <TextBlock Text="{Binding CurName}"
-                               FontSize="13"
-                               Foreground="#9fb0c8"
-                               VerticalAlignment="Center"
-                               MaxWidth="420"
-                               TextTrimming="CharacterEllipsis" />
-                </StackPanel>
-
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button Content="打开图库" Style="{StaticResource ToolButton}" Click="ActGallery" />
-                    <Button Content="选择图片" Style="{StaticResource ToolButton}" Click="ActFiles" />
-                    <Button Content="选择文件夹" Style="{StaticResource ToolButton}" Click="ActFolder" />
-                    <Button Content="回到上次" Style="{StaticResource ToolButton}" Click="ActResume" />
-                    <Button Content="选项" Style="{StaticResource ToolButton}" Margin="7,3,3,3" Click="ActOptions" />
-                    <Button Content="全屏" Style="{StaticResource ToolButton}" Click="ActFull" />
-                    <Button Content="{Binding SlideLabel}"
-                            Style="{StaticResource ToolButton}"
-                            Background="{Binding SlideBackground}"
-                            Foreground="{Binding SlideForeground}"
-                            Margin="7,3,3,3"
-                            Click="ActSlide" />
-                </StackPanel>
-            </Grid>
-        </Border>
-
         <!-- ===================== 主体 ===================== -->
-        <Grid Grid.Row="1">
+        <Grid Grid.Row="0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
@@ -224,7 +182,7 @@
                                    TextWrapping="Wrap"
                                    Margin="0,0,0,6"
                                    Visibility="{Binding ResumeHintVisibility}" />
-                        <TextBlock Text="点顶栏「打开图库」扫描图片库，或「选择图片」挑文件"
+                        <TextBlock Text="鼠标移到窗口顶部唤出工具栏：点「打开图库」扫描图片库，或「选择图片」挑文件"
                                    FontSize="11"
                                    Foreground="#5a6272"
                                    TextAlignment="Center"
@@ -334,7 +292,7 @@
         </Grid>
 
         <!-- ===================== 状态栏（全屏时隐藏）===================== -->
-        <Border Grid.Row="2"
+        <Border Grid.Row="1"
                 Height="26"
                 Background="#12161C"
                 Padding="16,0"
@@ -364,6 +322,54 @@
                            Foreground="#5a6272"
                            VerticalAlignment="Center"
                            ToolTip="{Binding GpuTip}" />
+            </Grid>
+        </Border>
+
+        <!-- ===================== 顶栏（浮层）=====================
+             默认隐藏，鼠标移到窗口顶部才浮出。做成浮层而不是让它占一行的原因是：
+             占位行一显一隐会把下方图片区域整块挤动（鼠标刚移出顶部，画面就一跳），
+             盖在内容之上则只有这一条自己动，预览尺寸完全不受影响。 -->
+        <Border x:Name="TopBar"
+                Grid.Row="0"
+                Height="52"
+                VerticalAlignment="Top"
+                Panel.ZIndex="10"
+                Background="#F21a1d23"
+                BorderBrush="#2a2f3a"
+                BorderThickness="0,0,0,1"
+                Padding="16,0,12,0"
+                Visibility="{Binding TopBarVisibility}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="PIKAN" FontSize="16" FontWeight="Bold" Foreground="#f2f5fa" />
+                    <TextBlock Text="·" FontSize="14" Foreground="#4a5262" Margin="8,0" />
+                    <TextBlock Text="{Binding CurName}"
+                               FontSize="13"
+                               Foreground="#9fb0c8"
+                               VerticalAlignment="Center"
+                               MaxWidth="420"
+                               TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="打开图库" Style="{StaticResource ToolButton}" Click="ActGallery" />
+                    <Button Content="选择图片" Style="{StaticResource ToolButton}" Click="ActFiles" />
+                    <Button Content="选择文件夹" Style="{StaticResource ToolButton}" Click="ActFolder" />
+                    <Button Content="回到上次" Style="{StaticResource ToolButton}" Click="ActResume" />
+                    <Button Content="选项" Style="{StaticResource ToolButton}" Margin="7,3,3,3" Click="ActOptions" />
+                    <Button Content="全屏" Style="{StaticResource ToolButton}" Click="ActFull" />
+                    <Button Content="{Binding SlideLabel}"
+                            Style="{StaticResource ToolButton}"
+                            Background="{Binding SlideBackground}"
+                            Foreground="{Binding SlideForeground}"
+                            Margin="7,3,3,3"
+                            Click="ActSlide" />
+                </StackPanel>
             </Grid>
         </Border>
     </Grid>
