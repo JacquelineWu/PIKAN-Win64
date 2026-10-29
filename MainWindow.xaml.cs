@@ -260,6 +260,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>用户自己已经开过图库/文件夹/文件；启动时的自动恢复要让路。</summary>
     private bool _userLoaded;
 
+    /// <summary>导航序号：连点「..」时用来丢掉先发后到的旧扫描结果。</summary>
+    private long _navSeq;
+
+    /// <summary>正在扫描新目录：此时左侧只出「..」与本层子文件夹，不出图片行。</summary>
+    private bool _listing;
+
     private bool _pendingReload;
 
     private WindowState _prevWindowState = WindowState.Maximized;
@@ -1187,15 +1193,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
         }
 
-        for (int i = 0; i < _items.Count; i++)
+        // 换目录的当口不出图片行：_items 还停在上层，挂上来就成了「新目录配旧档案表」
+        if (!_listing)
         {
-            ImageItem it = _items[i];
-            _entries.Add(new FsEntry(it.Path, FsEntry.EntryKind.Image)
+            for (int i = 0; i < _items.Count; i++)
             {
-                ItemIndex = i,
-                Size = it.Size,
-                Modified = it.Modified
-            });
+                ImageItem it = _items[i];
+                _entries.Add(new FsEntry(it.Path, FsEntry.EntryKind.Image)
+                {
+                    ItemIndex = i,
+                    Size = it.Size,
+                    Modified = it.Modified
+                });
+            }
         }
 
         List<FsEntry> rows = new(_entries);
@@ -1368,7 +1378,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void Select(int idx)
     {
-        if (idx < 0 || idx >= _items.Count)
+        // 换目录扫描期间 _items 还是上层的，这时翻页只会翻出「列表里根本没有」的图
+        if (_listing || idx < 0 || idx >= _items.Count)
         {
             return;
         }
@@ -1385,7 +1396,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void Go(int delta)
     {
-        if (_items.Count == 0)
+        if (_listing || _items.Count == 0)
         {
             return;
         }
@@ -2447,16 +2458,31 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         _userLoaded = true; // 用户主动开目录：启动时的自动恢复要让路
         _browseDir = recursive ? null : root; // null ⇒ 左侧不显示 .. 与子文件夹
+        long seq = ++_navSeq;
+
+        // 扫描是异步的，先把左侧换成「..」+ 本层子文件夹：上一层的档案表不能一直挂在那儿。
+        // 子文件夹是同步枚举（很快），图片要等扫描，所以中间这一小会儿列表里只有目录行。
+        _listing = true;
+        BuildEntries();
+        FileList.SelectedIndex = -1;
         Status = "正在扫描文件夹…";
+
         List<ImageItem>? found = await Task.Run(() => ScanFolder(root, recursive));
+
+        if (seq != _navSeq)
+        {
+            // 这期间又跳去别处了（连点「..」很常见），这份结果已经过期
+            return;
+        }
+
+        _listing = false;
 
         if (found is null || found.Count == 0)
         {
+            // 列表已经换成新目录了，_items 也得跟着清空，否则方向键还能翻到上一层的图。
+            // ApplyItems 会写「已载入 0 张」，所以空目录的提示要放在它之后。
+            ApplyItems(new List<ImageItem>(), FolderLabel(root));
             Status = $"「{root}」里没有找到受支持的图片";
-            _browseDir = recursive ? null : root;
-            BuildEntries();
-            OnPropertyChanged(nameof(DirLabel));
-            OnPropertyChanged(nameof(CanGoUp));
             return;
         }
 
