@@ -189,7 +189,11 @@
                                 <Setter Property="Padding" Value="0" />
                                 <Setter Property="Margin" Value="0,0,0,2" />
                                 <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                                <Setter Property="Focusable" Value="False" />
+                                <!-- 注意：绝不能在这里设 Focusable="False"。
+                                     WPF 的 ListBoxItem.HandleMouseButtonDown 里是
+                                     「if (可选中 && Focus()) 才通知 ListBox 选中」，
+                                     Focusable=False 会让 Focus() 恒为 false，
+                                     鼠标点击行就永远选不中（表现为点左边没反应）。 -->
                                 <Setter Property="Template">
                                     <Setter.Value>
                                         <ControlTemplate TargetType="ListBoxItem">
