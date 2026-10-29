@@ -1374,6 +1374,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             foreach (string sub in Directory.EnumerateDirectories(dir))
             {
+                // 以 . 开头的目录（.git、.thumbnails、.cache 之类）跟文件一样不列
+                if (IsDotName(sub))
+                {
+                    continue;
+                }
+
                 FileInfo fi = new(sub);
                 // 跳过系统 / 隐藏目录（System Volume Information、$RECYCLE.BIN 之类），
                 // 它们在资源管理器里也默认不显示，列出来只会干扰
@@ -2652,6 +2658,45 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// 名字以 . 开头（档案名与目录名都算）——这类东西是系统/工具留下的，不该出现在列表里。
+    /// 用 Path.GetFileName 取最后一段：对 "D://a//.git" 这种目录路径同样取到 ".git"。
+    /// </summary>
+    private static bool IsDotName(string path)
+    {
+        string name = Path.GetFileName(path);
+        return name.Length > 0 && name[0] == '.';
+    }
+
+    /// <summary>
+    /// 文件是否位于某个以 . 开头的子目录里（相对 <paramref name="root"/> 看中间那几段路径）。
+    /// 只给递归扫描用：单层浏览的文件不可能带中间段。
+    /// </summary>
+    private static bool IsInDotFolder(string path, string root)
+    {
+        if (path.Length <= root.Length)
+        {
+            return false;
+        }
+
+        string rel = path.Substring(root.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        int slash = rel.LastIndexOfAny(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar });
+        if (slash <= 0)
+        {
+            return false; // 就在根目录下
+        }
+
+        foreach (string seg in rel.Substring(0, slash).Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+        {
+            if (seg.Length > 0 && seg[0] == '.')
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>一次扫描的产出：可翻页的图片 + 本层不支持预览的文件（后者只在浏览器模式有）。</summary>
     private sealed class ScanResult
     {
@@ -2681,6 +2726,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
             foreach (string path in Directory.EnumerateFiles(root, "*", opt))
             {
+                // 以 . 开头的名字（.DS_Store、.gitignore、macOS 的 ._xxx.jpg 之类）一律不列。
+                // 放在 stat 之前，省一次白跑的系统调用
+                if (IsDotName(path))
+                {
+                    continue;
+                }
+
+                // 递归（图库）模式还会走进 .git / .thumbnails 这类目录，
+                // 里面的文件档案名本身不带点，但路径带 —— 同样不列
+                if (recursive && IsInDotFolder(path, root))
+                {
+                    continue;
+                }
+
                 long size = -1;
                 DateTime modified = DateTime.MinValue;
                 try
