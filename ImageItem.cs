@@ -58,6 +58,9 @@ public sealed class ImageItem : INotifyPropertyChanged
         }
     }
 
+    /// <summary>文件修改时间，未知为 null。与体积同一次 stat 取到，见 TryStat。</summary>
+    public DateTime? Modified { get; set; }
+
     public string SizeText => FormatBytes(_size);
 
     public static string FormatBytes(long n)

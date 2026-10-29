@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -44,6 +45,7 @@ public sealed class FsEntry : INotifyPropertyChanged
     }
 
     private long _size = -1;
+    private DateTime? _modified;
 
     public FsEntry(string path, EntryKind kind, string? name = null)
     {
@@ -83,31 +85,42 @@ public sealed class FsEntry : INotifyPropertyChanged
 
             _size = value;
             OnPropertyChanged(nameof(Size));
-            OnPropertyChanged(nameof(Detail));
+            OnPropertyChanged(nameof(SizeText));
         }
     }
 
-    /// <summary>行尾小字：文件是「JPG · 2.4 MB」，其余是类型说明。</summary>
-    public string Detail
+    /// <summary>文件修改时间，未知为 null（与体积一样由后台分批补测）。</summary>
+    public DateTime? Modified
+    {
+        get => _modified;
+        set
+        {
+            if (_modified == value)
+            {
+                return;
+            }
+
+            _modified = value;
+            OnPropertyChanged(nameof(DateText));
+        }
+    }
+
+    /// <summary>「字节」一列：整数的字节数带千分位，未测到显 --，目录留空。</summary>
+    public string SizeText
     {
         get
         {
-            if (IsUp)
+            if (Size > 0)
             {
-                return "上级目录";
+                return Size.ToString("N0", CultureInfo.InvariantCulture);
             }
 
-            if (IsFolder)
-            {
-                return "文件夹";
-            }
-
-            string e = System.IO.Path.GetExtension(Name);
-            string ext = e.Length <= 1 ? "RAW" : e.Substring(1).ToUpperInvariant();
-            string size = _size > 0 ? ImageItem.FormatBytes(_size) : "--";
-            return $"{ext} · {size}";
+            return IsImage ? "--" : "";
         }
     }
+
+    /// <summary>「日期」一列：年-月-日 时:分，未测到留空。</summary>
+    public string DateText => _modified is { } m ? m.ToString("yyyy-MM-dd HH:mm") : "";
 
     /// <summary>文件名颜色：目录/上级用青蓝，图片用常规灰，一眼就分得开。</summary>
     public string NameColor => IsImage ? "#9fb0c8" : "#6fd3cb";

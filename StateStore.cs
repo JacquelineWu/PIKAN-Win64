@@ -53,6 +53,9 @@ public sealed class AppState
     /// <summary>是否按自然序（一开就是 true：(1) (2) (11) 而不是 (1) (11) (2)）。</summary>
     public bool NaturalSort { get; set; } = true;
 
+    /// <summary>左侧档案列表拖出来的宽度（布局单位）；0 = 没拖过，用默认宽度。</summary>
+    public double ListWidth { get; set; }
+
     /// <summary>用户在「选项」里勾选的看图策略（五项，默认全开）。</summary>
     public AppOptions Options { get; set; } = new();
 

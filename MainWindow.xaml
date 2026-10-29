@@ -27,18 +27,21 @@
 
         <!-- ===================== 主体 ===================== -->
         <Grid Grid.Row="0">
+            <!-- 左栏宽度可被分隔条拖动（TwoWay 绑定到 ListColumnWidth，退出时记进 state.json）；
+                 预览区始终保持 Grid.Column=2，拖动不会挤到它。 -->
             <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="{Binding ListColumnWidth, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
 
             <!-- ==== 左侧：图像档案列表 ==== -->
             <Border Grid.Column="0"
-                    Width="280"
                     Background="#161a21"
                     Visibility="{Binding ChromeVisibility}">
                 <Grid>
                     <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
@@ -96,9 +99,23 @@
                         </StackPanel>
                     </Grid>
 
+                    <!-- 列标题：三列宽度与列表行绑的是同一组属性，永远对齐 -->
+                    <Grid Grid.Row="2" Margin="14,0,12,4">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="{Binding NameColWidth}" />
+                            <ColumnDefinition Width="{Binding SizeColWidth}" />
+                            <ColumnDefinition Width="{Binding DateColWidth}" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="档案名" FontSize="10" Foreground="#6b7488" />
+                        <TextBlock Grid.Column="1" Text="大小 (byte)" FontSize="10" Foreground="#6b7488"
+                                   HorizontalAlignment="Right" />
+                        <TextBlock Grid.Column="2" Text="日期" FontSize="10" Foreground="#6b7488"
+                                   HorizontalAlignment="Right" Margin="10,0,0,0" />
+                    </Grid>
+
                     <!-- 档案列表：虚拟化，只为屏幕上的几行建节点 -->
                     <ListBox x:Name="FileList"
-                             Grid.Row="2"
+                             Grid.Row="3"
                              Margin="6,0"
                              ItemsSource="{Binding Entries}"
                              Background="Transparent"
@@ -106,10 +123,16 @@
                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                              VirtualizingStackPanel.IsVirtualizing="True"
                              VirtualizingPanel.VirtualizationMode="Standard"
-                             SelectionChanged="FileList_SelectionChanged">
+                             SelectionChanged="FileList_SelectionChanged"
+                             SizeChanged="FileList_SizeChanged">
                         <ListBox.ItemTemplate>
                             <DataTemplate>
-                                <Border Padding="8,6" CornerRadius="6">
+                                <!-- 三栏：档案名 / 字节 / 日期。
+                                     列宽不用 Auto —— 每一行是各自的 DataTemplate 实例，
+                                     Auto 会让每行按自己的内容单独测量，列就对不齐了；
+                                     这里统一绑到窗口算好的三个宽度，天然对齐且不影响虚拟化
+                                     （换成 SharedSizeGroup 会逼着每一行都参与测量，虚拟化就废了）。 -->
+                                <Border Padding="8,5" CornerRadius="6">
                                     <Border.Style>
                                         <Style TargetType="Border">
                                             <Setter Property="Background" Value="Transparent" />
@@ -121,23 +144,30 @@
                                         </Style>
                                     </Border.Style>
                                     <Grid>
-                                        <Grid.RowDefinitions>
-                                            <RowDefinition Height="Auto" />
-                                            <RowDefinition Height="Auto" />
-                                        </Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="{Binding NameColWidth, RelativeSource={RelativeSource AncestorType=Window}}" />
+                                            <ColumnDefinition Width="{Binding SizeColWidth, RelativeSource={RelativeSource AncestorType=Window}}" />
+                                            <ColumnDefinition Width="{Binding DateColWidth, RelativeSource={RelativeSource AncestorType=Window}}" />
+                                        </Grid.ColumnDefinitions>
 
                                         <!-- 文件名：不显示缩略图，避免为列表格白白解码上千张小图 -->
-                                        <TextBlock Grid.Row="0"
+                                        <TextBlock Grid.Column="0"
                                                    Text="{Binding Name}"
                                                    FontSize="12"
                                                    Foreground="{Binding NameColor}"
                                                    FontWeight="{Binding Weight}"
                                                    TextTrimming="CharacterEllipsis" />
-                                        <TextBlock Grid.Row="1"
-                                                   Text="{Binding Detail}"
-                                                   FontSize="10"
+                                        <TextBlock Grid.Column="1"
+                                                   Text="{Binding SizeText}"
+                                                   FontSize="11"
+                                                   Foreground="#7f88a3"
+                                                   HorizontalAlignment="Right" />
+                                        <TextBlock Grid.Column="2"
+                                                   Text="{Binding DateText}"
+                                                   FontSize="11"
                                                    Foreground="#5a6272"
-                                                   Margin="0,2,0,0" />
+                                                   HorizontalAlignment="Right"
+                                                   Margin="10,0,0,0" />
                                     </Grid>
                                 </Border>
                             </DataTemplate>
@@ -166,7 +196,7 @@
                     </ListBox>
 
                     <!-- 空态 -->
-                    <StackPanel Grid.Row="2"
+                    <StackPanel Grid.Row="3"
                                 VerticalAlignment="Center"
                                 Margin="16,0"
                                 Visibility="{Binding EmptyVisibility}">
@@ -191,9 +221,23 @@
                 </Grid>
             </Border>
 
+            <!-- 左右分隔条：拖动改左栏宽度。做成透明背景 + 1px 细线，平时几乎看不见，
+                 鼠标移上去再显形，免得在深底上加一条突兀的白杠。 -->
+            <GridSplitter Grid.Column="1"
+                          Width="5"
+                          HorizontalAlignment="Stretch"
+                          VerticalAlignment="Stretch"
+                          Background="Transparent"
+                          Visibility="{Binding ChromeVisibility}"
+                          ResizeBehavior="PreviousAndNext"
+                          ShowsPreview="False"
+                          Cursor="SizeWE">
+                <GridSplitter.Opacity>0.6</GridSplitter.Opacity>
+            </GridSplitter>
+
             <!-- ==== 右侧：大图预览 ==== -->
             <Grid x:Name="CanvasArea"
-                  Grid.Column="1"
+                  Grid.Column="2"
                   Background="#5F5F5F"
                   ClipToBounds="True"
                   SizeChanged="CanvasArea_SizeChanged"

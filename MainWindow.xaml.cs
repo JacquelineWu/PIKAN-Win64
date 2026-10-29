@@ -171,6 +171,29 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // ---- 交互 ----
     private bool _fullscreen;
 
+    // ---- 左侧列表：档案名 / 字节 / 日期 三栏 ----
+
+    /// <summary>列表宽度下限：再窄三列就挤成一团了。</summary>
+    private const double ListMinWidth = 260;
+    private const double ListMaxWidth = 900;
+
+    /// <summary>默认宽度（布局单位）。三列要放得开，比原先只有文件名时宽一些。</summary>
+    private const double ListDefaultWidth = 380;
+
+    /// <summary>列间留白，两列各算一次。</summary>
+    private const double ColGap = 8;
+
+    /// <summary>留给垂直滚动条与行内边距的余量。</summary>
+    private const double ScrollReserve = 22;
+
+    /// <summary>列表正文的字号，算列宽时要按同一个字号量。</summary>
+    private const double ColFont = 11;
+
+    private double _listWidth = ListDefaultWidth;
+    private double _sizeColW = 62;
+    private double _dateColW = 104;
+    private bool _measuringCols;
+
     /// <summary>唤出热区：鼠标要压到**屏幕**顶端这段距离（物理像素）内，顶栏才浮出。
     /// 10 px 意味着得把鼠标推到显示器最上边那条线上，平时完全看不到工具条。</summary>
     private const double TopBarEdgePx = 10;
@@ -272,6 +295,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Perf.AttachFrameMonitor();
 
         ReadLastPos();
+
+        // 列表宽度沿用上次（0 表示从来没拖过分隔条，用默认宽度）
+        if (_state.ListWidth > 0)
+        {
+            _listWidth = Math.Clamp(_state.ListWidth, ListMinWidth, ListMaxWidth);
+            OnPropertyChanged(nameof(ListColumnWidth));
+        }
 
         // 列表排序沿用上次的偏好
         _sortDesc = _state.SortDesc;
@@ -427,6 +457,130 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     /// <summary>顶栏：只在鼠标贴近窗口顶部时浮出，其余时间隐藏。</summary>
     public Visibility TopBarVisibility => _topHover ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>
+    /// 左侧档案列表那一列的宽度。拖分隔条改的就是它，退出时记进 state.json。
+    ///
+    /// 类型必须是 <see cref="GridLength"/> 而不是 double：
+    /// ColumnDefinition.Width 是 GridLength，绑 double 时转换不生效（静默退回默认的 1*，
+    /// 左栏会跟预览区对半分），只有同类型绑 this 才既生效、又能被分隔条回写。
+    /// </summary>
+    public GridLength ListColumnWidth
+    {
+        get => new(_fullscreen ? 0 : _listWidth, GridUnitType.Pixel);
+        set
+        {
+            // 太窄会把三列挤没，给个下限
+            double w = Math.Clamp(value.Value, ListMinWidth, ListMaxWidth);
+            if (Math.Abs(_listWidth - w) < 0.5)
+            {
+                return;
+            }
+
+            _listWidth = w;
+            OnPropertyChanged(nameof(ListColumnWidth));
+        }
+    }
+
+    /// <summary>档案名列：列表可视宽度减去另两列、边距与滚动条之后的全部分给文件名，
+    /// 面板一宽就跟着变宽，不用各行列宽互相看齐（它们是各自测量的，天然对齐不了）。</summary>
+    public double NameColWidth
+    {
+        get
+        {
+            double rest = FileList.ActualWidth - SizeColWidth - DateColWidth - ColGap * 3 - ScrollReserve;
+            return Math.Max(48, rest);
+        }
+    }
+
+    /// <summary>「字节」列宽度，由内容最长的一行决定。</summary>
+    public double SizeColWidth
+    {
+        get => _sizeColW;
+        private set
+        {
+            if (Math.Abs(_sizeColW - value) < 0.5)
+            {
+                return;
+            }
+
+            _sizeColW = value;
+            OnPropertyChanged(nameof(SizeColWidth));
+            OnPropertyChanged(nameof(NameColWidth));
+        }
+    }
+
+    /// <summary>「日期」列宽度，同上。</summary>
+    public double DateColWidth
+    {
+        get => _dateColW;
+        private set
+        {
+            if (Math.Abs(_dateColW - value) < 0.5)
+            {
+                return;
+            }
+
+            _dateColW = value;
+            OnPropertyChanged(nameof(DateColWidth));
+            OnPropertyChanged(nameof(NameColWidth));
+        }
+    }
+
+    /// <summary>
+    /// 按内容重新定「字节 / 日期」两列的宽度 —— 这就是"自动 resize"的那部分：
+    /// 数字一位位变长（999,999 → 1,000,000）或目录换了一批，列宽自己跟上。
+    ///
+    /// 只测**字符数最多**的那一行就够了：这两列全是数字和分隔符，字符最多的基本就是最宽的，
+    /// 没必要给上千行逐个排一次字。
+    /// </summary>
+    private void AutoFitListColumns()
+    {
+        if (_measuringCols)
+        {
+            return;
+        }
+
+        _measuringCols = true;
+        try
+        {
+            string longestSize = "";
+            string longestDate = "";
+            foreach (FsEntry e in _entries)
+            {
+                if (e.SizeText.Length > longestSize.Length)
+                {
+                    longestSize = e.SizeText;
+                }
+
+                if (e.DateText.Length > longestDate.Length)
+                {
+                    longestDate = e.DateText;
+                }
+            }
+
+            Typeface face = new(FontFamily, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+            double dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
+
+            SizeColWidth = Math.Clamp(Math.Ceiling(Measure(longestSize.Length == 0 ? "--" : longestSize, face, dpi)) + ColGap, 44, 150);
+            DateColWidth = Math.Clamp(Math.Ceiling(Measure(longestDate.Length == 0 ? "2026-10-29 13:45" : longestDate, face, dpi)) + ColGap, 80, 160);
+
+            // 宽度可能压根没变（ setter 会早退 ），但档案名列吃的是剩余宽度，得自己刷一次
+            OnPropertyChanged(nameof(NameColWidth));
+        }
+        finally
+        {
+            _measuringCols = false;
+        }
+    }
+
+    private static double Measure(string s, Typeface face, double dpi) =>
+        new FormattedText(s, CultureInfo.CurrentCulture, System.Windows.FlowDirection.LeftToRight,
+                          face, ColFont, System.Windows.Media.Brushes.White, dpi).Width;
+
+    /// <summary>面板宽度变了，档案名列要跟着吃掉/吐出这部分空间。</summary>
+    private void FileList_SizeChanged(object sender, SizeChangedEventArgs e) =>
+        OnPropertyChanged(nameof(NameColWidth));
 
     public Visibility FullscreenVisibility => _fullscreen ? Visibility.Visible : Visibility.Collapsed;
     public Visibility EmptyVisibility => _cur >= 0 ? Visibility.Collapsed : Visibility.Visible;
@@ -721,17 +875,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _bytes = it.Size > 0 ? it.Size : TrySize(it.Path);
     }
 
-    private static long TrySize(string path)
+    /// <summary>一次 stat 把体积与修改时间都取回来：两者是同一个 FileInfo 的不同字段，
+    /// 分开读等于多跑一遍系统调用（上千文件时这两趟 IO 很显眼）。失败返回 (-1, null)。</summary>
+    private static (long Size, DateTime? Modified) TryStat(string path)
     {
         try
         {
-            return new FileInfo(path).Length;
+            FileInfo fi = new(path);
+            return (fi.Exists ? fi.Length : -1, fi.LastWriteTime);
         }
         catch
         {
-            return -1;
+            return (-1, null);
         }
     }
+
+    private static long TrySize(string path) => TryStat(path).Size;
 
     /// <summary>统一入口：提交档案列表、刷新计数、重建预览与预载。</summary>
     private void ApplyItems(List<ImageItem> list, string src, string capped = "")
@@ -810,16 +969,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             while (seq == _sizeSeq && i < snapshot.Count)
             {
                 int end = Math.Min(i + SizeChunk, snapshot.Count);
-                List<(ImageItem Item, long Size)> updates = new();
+                List<(ImageItem Item, long Size, DateTime? Modified)> updates = new();
                 for (int k = i; k < end; k++)
                 {
                     ImageItem it = snapshot[k];
-                    if (it.Size < 0)
+                    if (it.Size < 0 || it.Modified is null)
                     {
-                        long s = TrySize(it.Path);
-                        if (s > 0)
+                        (long s, DateTime? m) = TryStat(it.Path);
+                        if (s > 0 || m is not null)
                         {
-                            updates.Add((it, s));
+                            updates.Add((it, s, m));
                         }
                     }
                 }
@@ -834,18 +993,39 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                             return;
                         }
 
-                        // ImageItem 与左侧 FsEntry 是两份对象，补测到的体积要同步过去，
-                        // 否则列表行会一直停在 '--'
-                        foreach ((ImageItem item, long size) in updates)
+                        // ImageItem 与左侧 FsEntry 是两份对象，补测到的元数据要同步过去，
+                        // 否则列表行会一直停在 '--' / 空白
+                        foreach ((ImageItem item, long size, DateTime? modified) in updates)
                         {
-                            item.Size = size;
+                            if (size > 0)
+                            {
+                                item.Size = size;
+                            }
+
+                            if (modified is { } m)
+                            {
+                                item.Modified = m;
+                            }
 
                             int row = EntryIndexOfImage(snapshot.IndexOf(item));
-                            if (row >= 0)
+                            if (row < 0)
+                            {
+                                continue;
+                            }
+
+                            if (size > 0)
                             {
                                 _entries[row].Size = size;
                             }
+
+                            if (modified is { } md)
+                            {
+                                _entries[row].Modified = md;
+                            }
                         }
+
+                        // 数字一位位变长（譬如 999,999 → 1,000,000），列宽要跟着内容走
+                        AutoFitListColumns();
                     }, DispatcherPriority.Background);
                 }
 
@@ -1013,7 +1193,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _entries.Add(new FsEntry(it.Path, FsEntry.EntryKind.Image)
             {
                 ItemIndex = i,
-                Size = it.Size
+                Size = it.Size,
+                Modified = it.Modified
             });
         }
 
@@ -1025,6 +1206,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _entries.Add(row);
         }
 
+        // 换了一批行 → 字节数与日期的最长值可能变了，列宽重算一次
+        AutoFitListColumns();
         OnPropertyChanged(nameof(CountLabel));
     }
 
@@ -1044,7 +1227,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     continue;
                 }
 
-                list.Add(new FsEntry(sub, FsEntry.EntryKind.Folder));
+                // stat 已经做过了（为了判隐藏/系统），顺手记下修改日期，列表第三列要用
+                list.Add(new FsEntry(sub, FsEntry.EntryKind.Folder) { Modified = fi.LastWriteTime });
             }
         }
         catch
@@ -2863,6 +3047,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         StopSlide();
         _posTimer.Stop();
         FlushPos();
+
+        // 左侧列表拖到多宽，下次打开还是这么宽
+        _state.ListWidth = _listWidth;
+        _state.Save();
     }
 
     /// <summary>
@@ -2872,6 +3060,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void Window_DpiChanged(object sender, System.Windows.DpiChangedEventArgs e)
     {
         RefreshImageInfo();
+        AutoFitListColumns();
         ScheduleRefine();
     }
 
