@@ -231,6 +231,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private WindowState _prevWindowState = WindowState.Maximized;
     private WindowStyle _prevWindowStyle = WindowStyle.SingleBorderWindow;
     private ResizeMode _prevResizeMode = ResizeMode.CanResize;
+    private bool _prevTopmost;
 
     public MainWindow()
     {
@@ -2628,14 +2629,24 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _prevWindowState = WindowState;
             _prevWindowStyle = WindowStyle;
             _prevResizeMode = ResizeMode;
+            _prevTopmost = Topmost;
             WindowStyle = WindowStyle.None;
             ResizeMode = ResizeMode.NoResize;
+            Topmost = true;
             WindowState = WindowState.Maximized;
+
+            // WPF 改完状态还要走一次布局才落到 HWND 上，所以钉两遍：
+            // 现在钉一次（同步），布局完成后再钉一次（防 WPF 把它收回工作区）
+            Fullscreen.Snap(this);
+            Dispatcher.BeginInvoke(
+                System.Windows.Threading.DispatcherPriority.Loaded,
+                new Action(() => { if (_fullscreen) Fullscreen.Snap(this); }));
         }
         else
         {
             WindowStyle = _prevWindowStyle;
             ResizeMode = _prevResizeMode;
+            Topmost = _prevTopmost;
             WindowState = _prevWindowState;
         }
 
