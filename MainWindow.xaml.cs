@@ -275,6 +275,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>正在扫描新目录：此时左侧只出「..」与本层子文件夹，不出图片行。</summary>
     private bool _listing;
 
+    /// <summary>
+    /// 目录导航的静默期（毫秒）：一次点击被鼠标抖动拆成两次时，只认第一次。
+    ///
+    /// 取系统双击间隔（默认 500 ms，上限截到 400）：这是系统认定的「同一下点击」范围，
+    /// 抖动的第二下、以及习惯性双击的第二下，都落在这个窗口里，正好该算作一次操作。
+    /// 抖动那一下落在**已经换好的新列表**的同一屏幕位置上，那里可能正好是个子文件夹，
+    /// 不拦就会「点一下进了两层」。取上限 400 是为了别把双击间隔设得很大的人卡住。
+    /// </summary>
+    private static readonly int NavQuietMs = Math.Min(Forms.SystemInformation.DoubleClickTime, 400);
+
+    /// <summary>静默期截止时刻（Environment.TickCount64）。</summary>
+    private long _navQuietUntil;
+
     private bool _pendingReload;
 
     private WindowState _prevWindowState = WindowState.Maximized;
@@ -3153,6 +3166,30 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // ==================================================================
 
     /// <summary>
+    /// 导航闸门：一串点击只放行第一次，其余丢弃。
+    ///
+    /// 退回 false 的两种情况：
+    /// 1. 上一次导航还在扫描（<see cref="_listing"/>）——那时列表正被整批替换，选中不可信；
+    /// 2. 刚放行过一次、还没过静默期 —— 这是鼠标抖动或系统把一次点击拆成两次。
+    /// </summary>
+    private bool AllowNav()
+    {
+        if (_listing)
+        {
+            return false;
+        }
+
+        long now = Environment.TickCount64;
+        if (now < _navQuietUntil)
+        {
+            return false;
+        }
+
+        _navQuietUntil = now + NavQuietMs;
+        return true;
+    }
+
+    /// <summary>
     /// 左侧点一下：图片立刻上右边显示；子文件夹直接进；「..」回上一级。
     /// 单击（而不是双击）是为了和「点文件名立刻看图」保持一致的手感。
     /// </summary>
@@ -3169,15 +3206,28 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         FsEntry row = _entries[i];
 
-        if (row.IsUp)
+        // 导航类行（.. 与子文件夹）先过闸门。
+        // 换目录会把整个列表换掉，鼠标抖动那半次点击会落在新列表的同一屏幕位置，
+        // 不拦就顺着又进一层；扫描还没落地时来的选中同样不能信（那时列表正被整批替换）。
+        if (row.IsUp || row.IsFolder)
         {
-            GoUp();
-            return;
-        }
+            if (!AllowNav())
+            {
+                // 抖动的另一半：别留一个「亮着却没进去」的行 —— 留着的话，用户稍后再点同一行
+                // 不会再有 SelectionChanged（本来就已经选中），得点两次才生效
+                FileList.SelectedIndex = -1;
+                return;
+            }
 
-        if (row.IsFolder)
-        {
-            _ = LoadFolderAsync(row.Path, "folder", recursive: false);
+            if (row.IsUp)
+            {
+                GoUp();
+            }
+            else
+            {
+                _ = LoadFolderAsync(row.Path, "folder", recursive: false);
+            }
+
             return;
         }
 
