@@ -240,6 +240,7 @@
             <Grid x:Name="CanvasArea"
                   Grid.Column="2"
                   Background="#5F5F5F"
+                  UseLayoutRounding="True"
                   ClipToBounds="True"
                   SizeChanged="CanvasArea_SizeChanged"
                   MouseWheel="CanvasArea_MouseWheel"

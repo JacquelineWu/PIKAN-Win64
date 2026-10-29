@@ -1138,12 +1138,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Frame.Width = FrameW;
         Frame.Height = FrameH;
 
-        _mainScale.ScaleX = _zoom * (TotalFlipH ? -1 : 1);
-        _mainScale.ScaleY = _zoom * (_flipV ? -1 : 1);
+        // zoom 已烤进布局宽高时（缩放停稳后的精修态），RenderTransform 只剩镜像方向；
+        // 低清占位层从不烤，永远跟 _zoom 走。
+        double zs = _zoomBaked ? 1 : _zoom;
+        _mainScale.ScaleX = zs * (TotalFlipH ? -1 : 1);
+        _mainScale.ScaleY = zs * (_flipV ? -1 : 1);
 
         // 低清占位层与主层用同样的变换（早期版本这里有过对焦呼吸缩放，已移除）
-        _lowScale.ScaleX = _mainScale.ScaleX;
-        _lowScale.ScaleY = _mainScale.ScaleY;
+        _lowScale.ScaleX = _zoom * (TotalFlipH ? -1 : 1);
+        _lowScale.ScaleY = _zoom * (_flipV ? -1 : 1);
 
         Matrix m = new();
         m.Translate(_tx, _ty);
@@ -1153,6 +1156,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void ResetView()
     {
+        UnbakeZoom();
         _zoom = 1;
         _tx = 0;
         _ty = 0;
@@ -1433,6 +1437,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         _viewTouched = true;
         _zoom = Clamp(_zoom * factor, MinScale, MaxScale);
+        UnbakeZoom();
         UpdateTransform();
         RefreshImageInfo();
         ScheduleRefine();
@@ -1471,6 +1476,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         _zoom = next;
         _viewTouched = true;
+        UnbakeZoom();
         UpdateTransform();
         RefreshImageInfo();
         ScheduleRefine();
@@ -1482,6 +1488,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         _tx = 0;
         _ty = 0;
+        UnbakeZoom();
         double f = FitFactor();
         if (f <= 0)
         {
@@ -1776,10 +1783,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         NoteShown(img.Path);
         Perf.Tick("NoteShown");
         _viewOwned = img;
+
+        ApplyExifOrientation(img);   // 必须先于几何计算：_imgW/_imgH 要按转正后的尺寸算
+        ApplyViewGeometry(img);      // 钉到设备像素网格，精修成品才能 1:1 上屏
+
         MainImage.Source = img.Source;
         Perf.Tick("MainImage.Source 赋值（位图上传 + 布局失效）");
-
-        ApplyExifOrientation(img);   // 必须先于 _imgW/_imgH 与 ApplyFitPolicy
 
         if (!_viewTouched)
         {
@@ -1790,6 +1799,75 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Perf.Tick("UpdateTransform");
         RefreshImageInfo();
         Perf.Tick("RefreshImageInfo");
+    }
+
+    /// <summary>
+    /// 把主视图元素钉在「适应窗口」的设备像素矩形上（zoom 由 RenderTransform 另行承担）。
+    ///
+    /// 为什么要钉：画布尺寸常是小数（如 1151.2 DIP），Uniform 布局算出的图片矩形
+    /// 会落在 400.2px 这种半个像素上，WPF 只好把精修成品再重采样一遍——
+    /// 明明是 1:1 的位图也要被 Fant 滤一遍，整张图凭空发糊。
+    /// 显式宽高 + Stretch=Fill + UseLayoutRounding 之后，矩形原点与尺寸都落在
+    /// 整数设备像素上：适应窗口（zoom=1）时位图与屏幕严格 1:1，WPF 一个像素都不用猜。
+    /// </summary>
+    private void ApplyViewGeometry(DecodedImage img)
+    {
+        (int fw, int fh) = FitDeviceSize(img);
+        if (fw <= 0)
+        {
+            return;
+        }
+
+        double dpi = DpiFactor;
+        if (_zoomBaked)
+        {
+            // 烤进布局的 zoom 同样要取整：显示矩形 = 布局取整 × 变换(1)，
+            // 与精修目标 TargetPixelSize 的取整方式保持一致才能严格 1:1
+            fw = Math.Max(1, (int)Math.Round(fw * _zoom));
+            fh = Math.Max(1, (int)Math.Round(fh * _zoom));
+        }
+
+        MainImage.Stretch = Stretch.Fill;
+        MainImage.Width = fw / dpi;
+        MainImage.Height = fh / dpi;
+    }
+
+    /// <summary>true = zoom 已烤进布局宽高（缩放停稳后的精修态），RenderTransform 只剩镜像。</summary>
+    private bool _zoomBaked;
+
+    /// <summary>
+    /// 缩放交互开始：把 zoom 从布局宽高里解冻，恢复 RenderTransform 缩放，
+    /// 滚轮/捏合才有即时反馈。几何与变换互补，画面不会跳。
+    /// </summary>
+    private void UnbakeZoom()
+    {
+        if (!_zoomBaked)
+        {
+            return;
+        }
+
+        _zoomBaked = false;
+        if (_viewOwned is not null)
+        {
+            ApplyViewGeometry(_viewOwned);
+        }
+    }
+
+    /// <summary>
+    /// 缩放停稳（ScheduleRefine 时调用）：把 zoom 烤进布局宽高。
+    /// 布局宽高会被 UseLayoutRounding 取整到设备像素——这是任意 zoom 档
+    /// 都能做到「成品位图 1:1 上屏」的关键，靠 RenderTransform 是取不了整的。
+    /// </summary>
+    private void BakeZoom()
+    {
+        if (_zoomBaked || _viewOwned is null)
+        {
+            return;
+        }
+
+        _zoomBaked = true;
+        ApplyViewGeometry(_viewOwned);
+        UpdateTransform();
     }
 
     /// <summary>
@@ -1831,6 +1909,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// </summary>
     private void ApplyFitPolicy()
     {
+        UnbakeZoom(); // 要改 _zoom，先解冻（新图到来时上一个 zoom 的烤入态作废）
+
         if (_opts.UpscaleSmallToFit)
         {
             return;
@@ -2004,12 +2084,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         (int w, int h) = TargetPixelSize(src);
-        GpuDiagnose($"refine 目标 {w}x{h}  位图 {src.Source.PixelWidth}x{src.Source.PixelHeight}  原图 {src.Width}x{src.Height}");
+        GpuDiagnose($"refine 目标 {w}x{h}  位图 {src.Source.PixelWidth}x{src.Source.PixelHeight}  原图 {src.Width}x{src.Height}" +
+                    $"  _img {_imgW}x{_imgH}  Frame {FrameW:F0}x{FrameH:F0}  zoom {_zoom:F2} baked {_zoomBaked} rot {TotalRot}");
 
         if (w <= 0 || h <= 0)
         {
             return;
         }
+
+        ApplyViewGeometry(src); // zoom 变了 → 矩形重新钉到设备像素，成品位图保持 1:1
 
         if (w >= src.Source.PixelWidth || h >= src.Source.PixelHeight)
         {
@@ -2172,6 +2255,23 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>当前 zoom / 旋转 / DPI 下，这张图实际占多少屏幕像素。</summary>
     private (int W, int H) TargetPixelSize(DecodedImage img)
     {
+        (int fw, int fh) = FitDeviceSize(img);
+        if (fw <= 0)
+        {
+            return (0, 0);
+        }
+
+        // 必须「先取整适应矩形、再乘 zoom」：显示矩形就是这两步的复合
+        // （布局取整 × RenderTransform），反着算会差出 1px，成品位图又得被重采样。
+        return (Math.Max(1, (int)Math.Round(fw * _zoom)), Math.Max(1, (int)Math.Round(fh * _zoom)));
+    }
+
+    /// <summary>
+    /// 「适应窗口」时这张图占的设备像素矩形（不含 zoom，取整后与
+    /// <see cref="ApplyViewGeometry"/> 钉死的布局矩形严格一致）。
+    /// </summary>
+    private (int W, int H) FitDeviceSize(DecodedImage img)
+    {
         double f = FitFactor();
         if (f <= 0 || img.Width <= 0 || img.Height <= 0)
         {
@@ -2180,9 +2280,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         (int ew, int eh) = DisplaySize(img);
         double dpi = DpiFactor;
-        int w = (int)Math.Round(ew * f * _zoom * dpi);
-        int h = (int)Math.Round(eh * f * _zoom * dpi);
-        return (Math.Max(1, w), Math.Max(1, h));
+        return (Math.Max(1, (int)Math.Round(ew * f * dpi)), Math.Max(1, (int)Math.Round(eh * f * dpi)));
     }
 
     /// <summary>
@@ -2223,6 +2321,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             return;
         }
+
+        BakeZoom(); // 缩放停稳：把 zoom 烤进布局并取整到设备像素，成品位图才能 1:1 上屏
 
         (int w, int h) = TargetPixelSize(_viewOwned);
         int need = Math.Max(w, h);
@@ -3185,6 +3285,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void CanvasArea_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         UpdateTransform();
+
+        // 主视图宽高是显式钉死的（设备像素对齐），画布一变就得跟着重算，
+        // 否则换了窗口尺寸图片还停在旧大小（Uniform 自动适应已经不生效了）。
+        if (_viewOwned is not null)
+        {
+            ApplyViewGeometry(_viewOwned);
+        }
+
         if (_pendingReload && _cur >= 0)
         {
             _pendingReload = false;
@@ -3381,6 +3489,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         RefreshImageInfo();
         AutoFitListColumns();
+        // 显式宽高按 DIP 存，DPI 一变同样的 DIP 对应的设备像素就不同了，必须重钉
+        if (_viewOwned is not null)
+        {
+            ApplyViewGeometry(_viewOwned);
+        }
         ScheduleRefine();
     }
 
@@ -3666,6 +3779,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 _tx = 0;
                 _ty = 0;
                 _zoom = Clamp(zoom(), MinScale, MaxScale);
+                UnbakeZoom();
                 UpdateTransform();
                 RefreshImageInfo();
                 ScheduleRefine();
