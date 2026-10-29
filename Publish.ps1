@@ -37,29 +37,37 @@ Set-Location $PSScriptRoot
 # 与本工程代码无关。这里做一次兜底：正常跑一遍，失败就用 --no-restore 再跑
 # （obj\project.assets.json 已在，缺的只是联网还原）。
 function Invoke-Dotnet {
-    param([Parameter(ValueFromRemainingArguments = $true)] [string[]] $Args)
+    param([Parameter(ValueFromRemainingArguments = $true)] [string[]] $Rest)
 
-    & $dotnet.Source @Args
+    & $dotnet.Source @Rest
     $code = $LASTEXITCODE
 
     if ($null -eq $code -or $code -ne 0) {
         Write-Host "  （首次尝试未成功，改用 --no-restore 重试）" -ForegroundColor Yellow
-        & $dotnet.Source @Args '--no-restore'
+        & $dotnet.Source @Rest '--no-restore'
         $code = $LASTEXITCODE
     }
 
     if ($null -eq $code -or $code -ne 0) {
-        throw "dotnet $($Args -join ' ') 失败（exit $code）"
+        throw "dotnet $($Rest -join ' ') 失败（exit $code）"
     }
 }
 
+# 注意：参数必须以数组形式 splat 进来（Invoke-Dotnet @buildArgs，而不是把 -c / -p:x=y
+# 直接写在命令行里）——后者会被 shell 当成本函数的参数名去解析，
+# -o / -p 恰好都能对上 -OutVariable / -OutBuffer / -ProgressAction 等通用参数，报 “ambiguous”。
+$buildArgs = @('build', '-c', 'Release')
+$publishArgs = @(
+    'publish', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true',
+    '-p:PublishSingleFile=false', '-p:DebugType=none', '-p:SatelliteResourceLanguages=en',
+    '--output', $Out
+)
+
 Write-Host "`n[1/3] 编译 Release ..." -ForegroundColor Cyan
-Invoke-Dotnet build -c Release
+Invoke-Dotnet @buildArgs
 
 Write-Host "`n[2/3] 发布便携版 → $Out" -ForegroundColor Cyan
-Invoke-Dotnet publish -c Release -r win-x64 --self-contained true `
-    -p:PublishSingleFile=false -p:DebugType=none -p:SatelliteResourceLanguages=en `
-    -o $Out
+Invoke-Dotnet @publishArgs
 
 $exe = Join-Path $Out 'PIKAN.exe'
 if (-not (Test-Path $exe)) { throw "发布完成但找不到 $exe" }

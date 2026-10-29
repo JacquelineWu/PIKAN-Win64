@@ -171,9 +171,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // ---- 交互 ----
     private bool _fullscreen;
 
-    /// <summary>顶栏热区高度（相对窗口顶部，单位与布局一致的 1/96 英寸）。
-    /// 比顶栏自身的 52 高一截，鼠标停在栏下方一点点也不会立刻消失。</summary>
-    private const double TopBarHotZone = 64;
+    /// <summary>唤出热区：鼠标要压到**屏幕**顶端这段距离（物理像素）内，顶栏才浮出。
+    /// 10 px 意味着得把鼠标推到显示器最上边那条线上，平时完全看不到工具条。</summary>
+    private const double TopBarEdgePx = 10;
+
+    /// <summary>已经浮出之后的保持余量：鼠标要退到顶栏下沿再往下这么多才会收起。
+    /// 这段滞回是必需的——顶栏自身高 52，比 10 px 的唤出热区高得多，
+    /// 不放宽的话鼠标从屏幕边缘往下一移到按钮上就超出 10 px，
+    /// 栏会在手指按下去之前自己消失。</summary>
+    private const double TopBarKeepPx = 8;
 
     private bool _topHover;
     private bool _playing;
@@ -2498,7 +2504,41 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>鼠标进入窗口顶部热区 → 浮出顶栏；离开这块或移出窗口 → 收起。</summary>
     private void Window_PreviewMouseMove(object sender, MouseEventArgs e)
     {
-        SetTopHover(e.GetPosition(this).Y <= TopBarHotZone);
+        SetTopHover(TopBarShouldShow(e.GetPosition(this)));
+    }
+
+    /// <summary>按鼠标所在的窗口坐标判断顶栏该不该浮出。</summary>
+    private bool TopBarShouldShow(Point local)
+    {
+        // 已经浮出来的时候判据放宽到「还在栏上」：唤出热区只有 10 px，比栏本身矮得多，
+        // 不这么做的话鼠标从屏幕边缘往下一移、还没够到按钮，栏就自己收回去了。
+        return _topHover
+            ? local.Y <= TopBar.ActualHeight + TopBarKeepPx
+            : AtScreenTopEdge(local);
+    }
+
+    /// <summary>鼠标是否压在当前显示器最上面那 TopBarEdgePx 个物理像素里。
+    /// 按屏幕坐标而不是窗口坐标算：要的是「屏幕顶端」，窗口还原出来时两者差着一整条标题栏，
+    /// 只看窗口坐标会把窗口里的位置误当成屏幕上的位置。</summary>
+    private bool AtScreenTopEdge(Point local)
+    {
+        // 兜底：窗口缩小 / 没贴屏幕顶边时够不到屏幕上边缘，窗口顶部同样一段距离也认，
+        // 免得这种状态下压根唤不出工具条。
+        if (local.Y <= DeviceToLogicalY(TopBarEdgePx))
+        {
+            return true;
+        }
+
+        // 也要按所在显示器算，副屏排在主屏上方时它的顶边不是 0。
+        Point scr = PointToScreen(local);
+        return scr.Y - Fullscreen.MonitorTop(this) <= TopBarEdgePx;
+    }
+
+    /// <summary>物理像素 → WPF 布局单位（1/96 英寸）的纵向换算。</summary>
+    private double DeviceToLogicalY(double px)
+    {
+        CompositionTarget? ct = PresentationSource.FromVisual(this)?.CompositionTarget;
+        return ct is null ? px : px * ct.TransformFromDevice.M22;
     }
 
     private void Window_MouseLeave(object sender, MouseEventArgs e)

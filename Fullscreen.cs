@@ -57,6 +57,31 @@ public static class Fullscreen
     }
 
     /// <summary>
+    /// 窗口所在那块显示器的顶边纵坐标（本机物理像素坐标系）。
+    /// 主屏恒为 0，但副屏排在主屏下方/上方时并不为 0 —— 判「鼠标是否贴到屏幕顶边」
+    /// 必须减掉这个值，否则在副屏里永远够不到 10 px 的那条线。拿不到就当 0。
+    /// </summary>
+    public static int MonitorTop(Window window)
+    {
+        try
+        {
+            IntPtr hwnd = new WindowInteropHelper(window).Handle;
+            if (hwnd == IntPtr.Zero)
+            {
+                return 0;
+            }
+
+            IntPtr mon = MonitorFromWindow(hwnd, MonitorDefaultToNearest);
+            MonitorInfo mi = new() { Size = Marshal.SizeOf<MonitorInfo>() };
+            return GetMonitorInfo(mon, ref mi) ? mi.Monitor.Top : 0;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>
     /// 把窗口精确铺到它所在的那块显示器上，并顶到最前。
     /// 失败就静默——全屏铺不满最多是留条边，不该抛异常打断看图。
     /// </summary>
