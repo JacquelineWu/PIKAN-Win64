@@ -599,6 +599,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     public Visibility FullscreenVisibility => _fullscreen ? Visibility.Visible : Visibility.Collapsed;
     public Visibility EmptyVisibility => _cur >= 0 ? Visibility.Collapsed : Visibility.Visible;
+
+    /// <summary>
+    /// 左侧栏的空态：只有列表真的一行都没有时才出现。
+    ///
+    /// 这个面板和文件列表叠在同一个 Grid 行、且排在后面，只要它可见就把列表整个盖住。
+    /// 光看「有没有当前图」不够：打开一个没有图片的目录时，列表里还有「..」、子文件夹和灰行，
+    /// 盖上一句「还没有图片」等于把这些行全遮了，连退回上层都点不到。
+    /// 所以判据是「没有当前图 **且** 一行都没有」；状态栏那句提示照旧说明目录里没图。
+    /// </summary>
+    public Visibility ListEmptyVisibility =>
+        _cur < 0 && _entries.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     public Visibility HasImageView => _cur >= 0 ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ResumeHintVisibility => _resumeHint.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
 
@@ -614,6 +625,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         OnPropertyChanged(nameof(ZoomText));
         OnPropertyChanged(nameof(InfoLine));
         OnPropertyChanged(nameof(EmptyVisibility));
+        OnPropertyChanged(nameof(ListEmptyVisibility));
         OnPropertyChanged(nameof(HasImageView));
     }
 
@@ -1242,6 +1254,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         // 换了一批行 → 字节数与日期的最长值可能变了，列宽重算一次
         AutoFitListColumns();
         OnPropertyChanged(nameof(CountLabel));
+
+        // 行数变了要重判空态：目录里没图但有「..」/子文件夹时，不能再拿「还没有图片」盖住列表
+        OnPropertyChanged(nameof(ListEmptyVisibility));
 
         // 子文件夹的总容量要在后台慢慢算（递归枚举，不能占 UI 线程）。
         // 扫描期间那几行马上就会被新行替掉，不必白算一遍。

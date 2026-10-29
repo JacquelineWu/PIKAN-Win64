@@ -196,11 +196,11 @@
                         </ListBox.ItemContainerStyle>
                     </ListBox>
 
-                    <!-- 空态 -->
+                    <!-- 空态：只在列表一行都没有时出现（有「..」/子文件夹/灰行时别盖住它们） -->
                     <StackPanel Grid.Row="3"
                                 VerticalAlignment="Center"
                                 Margin="16,0"
-                                Visibility="{Binding EmptyVisibility}">
+                                Visibility="{Binding ListEmptyVisibility}">
                         <TextBlock Text="还没有图片"
                                    FontSize="13"
                                    Foreground="#7f88a3"
