@@ -61,11 +61,12 @@ public sealed class ImageItem : INotifyPropertyChanged
     /// <summary>文件修改时间，未知为 null。与体积同一次 stat 取到，见 TryStat。</summary>
     public DateTime? Modified { get; set; }
 
-    public string SizeText => FormatBytes(_size);
+    /// <summary>未知（&lt; 0）显 --，0 字节显 0 B——文件夹总容量可能是 0，不能跟着显 --。</summary>
+    public string SizeText => _size >= 0 ? FormatBytes(_size) : "--";
 
     public static string FormatBytes(long n)
     {
-        if (n <= 0)
+        if (n < 0)
         {
             return "--";
         }
@@ -75,12 +76,17 @@ public sealed class ImageItem : INotifyPropertyChanged
             return n + " B";
         }
 
-        if (n < 1024 * 1024)
+        if (n < 1024L * 1024)
         {
             return (n / 1024.0).ToString("0.0") + " KB";
         }
 
-        return (n / 1024.0 / 1024.0).ToString("0.00") + " MB";
+        if (n < 1024L * 1024 * 1024)
+        {
+            return (n / 1024.0 / 1024.0).ToString("0.00") + " MB";
+        }
+
+        return (n / 1024.0 / 1024.0 / 1024.0).ToString("0.00") + " GB";
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

@@ -105,17 +105,25 @@ public sealed class FsEntry : INotifyPropertyChanged
         }
     }
 
-    /// <summary>「字节」一列：整数的字节数带千分位，未测到显 --，目录留空。</summary>
+    /// <summary>
+    /// 「大小」一列。图片按字节数带千分位（要的就是原始 byte）；
+    /// 文件夹显总容量（后台递归求和，算完之前先是 …）；「..」留空。
+    /// </summary>
     public string SizeText
     {
         get
         {
-            if (Size > 0)
+            if (IsUp)
             {
-                return Size.ToString("N0", CultureInfo.InvariantCulture);
+                return "";
             }
 
-            return IsImage ? "--" : "";
+            if (IsFolder)
+            {
+                return Size < 0 ? "…" : ImageItem.FormatBytes(Size);
+            }
+
+            return Size > 0 ? Size.ToString("N0", CultureInfo.InvariantCulture) : "--";
         }
     }
 

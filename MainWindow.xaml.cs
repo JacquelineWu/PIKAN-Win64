@@ -263,6 +263,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>导航序号：连点「..」时用来丢掉先发后到的旧扫描结果。</summary>
     private long _navSeq;
 
+    /// <summary>目录容量求和的序号：换目录后旧的那批结果就别回填了。</summary>
+    private long _folderSizeSeq;
+
     /// <summary>正在扫描新目录：此时左侧只出「..」与本层子文件夹，不出图片行。</summary>
     private bool _listing;
 
@@ -1219,6 +1222,100 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         // 换了一批行 → 字节数与日期的最长值可能变了，列宽重算一次
         AutoFitListColumns();
         OnPropertyChanged(nameof(CountLabel));
+
+        // 子文件夹的总容量要在后台慢慢算（递归枚举，不能占 UI 线程）。
+        // 扫描期间那几行马上就会被新行替掉，不必白算一遍。
+        if (!_listing)
+        {
+            FillFolderSizes();
+        }
+    }
+
+    /// <summary>
+    /// 后台算每个子文件夹的总容量（递归求和）。
+    /// 一次只走一个目录，算完一个回填一个，用户会看到 … 逐个变成 2.35 GB；
+    /// 中途换目录就靠 <see cref="_folderSizeSeq"/> 让旧任务自行收工。
+    /// </summary>
+    private void FillFolderSizes()
+    {
+        List<FsEntry> dirs = new();
+        foreach (FsEntry e in _entries)
+        {
+            if (e.IsFolder)
+            {
+                dirs.Add(e);
+            }
+        }
+
+        if (dirs.Count == 0)
+        {
+            return;
+        }
+
+        long seq = ++_folderSizeSeq;
+        _ = Task.Run(async () =>
+        {
+            foreach (FsEntry d in dirs)
+            {
+                if (seq != _folderSizeSeq)
+                {
+                    return; // 已经换到别的目录了，这批结果没人要
+                }
+
+                long total = FolderSize(d.Path);
+
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (seq != _folderSizeSeq)
+                    {
+                        return;
+                    }
+
+                    d.Size = total;
+
+                    // 总容量比图片的字节数短（2.35 GB vs 13,850,860），列宽要重新量一次
+                    AutoFitListColumns();
+                }, DispatcherPriority.Background);
+            }
+        });
+    }
+
+    /// <summary>
+    /// 递归求一个目录下所有文件的大小之和。
+    /// AttributesToSkip 里带上 ReparsePoint：不跟着符号链接 / 目录联接走，否则可能绕圈走不完。
+    /// </summary>
+    private static long FolderSize(string dir)
+    {
+        long total = 0;
+        try
+        {
+            EnumerationOptions opt = new()
+            {
+                RecurseSubdirectories = true,
+                IgnoreInaccessible = true,
+                AttributesToSkip = FileAttributes.ReparsePoint
+            };
+
+            // 用 DirectoryInfo.EnumerateFiles：条目自带的 Length 直接来自 FindFirstFile 的数据，
+            // 不用对每个文件再 stat 一次，几十万文件的目录也不会慢一倍
+            foreach (FileInfo fi in new DirectoryInfo(dir).EnumerateFiles("*", opt))
+            {
+                try
+                {
+                    total += fi.Length;
+                }
+                catch
+                {
+                    // 单个文件读不到就跳过
+                }
+            }
+        }
+        catch
+        {
+            // 目录没权限：能加到多少算多少
+        }
+
+        return total;
     }
 
     /// <summary>列出目录下的直接子文件夹（只一层，不递归）。</summary>

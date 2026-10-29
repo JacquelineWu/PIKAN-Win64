@@ -107,8 +107,9 @@
                             <ColumnDefinition Width="{Binding DateColWidth}" />
                         </Grid.ColumnDefinitions>
                         <TextBlock Grid.Column="0" Text="档案名" FontSize="10" Foreground="#6b7488" />
-                        <TextBlock Grid.Column="1" Text="大小 (byte)" FontSize="10" Foreground="#6b7488"
-                                   HorizontalAlignment="Right" />
+                        <TextBlock Grid.Column="1" Text="大小" FontSize="10" Foreground="#6b7488"
+                                   HorizontalAlignment="Right"
+                                   ToolTip="图片显示字节数（原始 byte）；文件夹显示内含全部文件的总容量" />
                         <TextBlock Grid.Column="2" Text="日期" FontSize="10" Foreground="#6b7488"
                                    HorizontalAlignment="Right" Margin="10,0,0,0" />
                     </Grid>
