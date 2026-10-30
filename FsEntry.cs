@@ -62,11 +62,36 @@ public sealed class FsEntry : INotifyPropertyChanged
         {
             Name = path;
         }
+
+        DisplayName = FileNameRepair.Fix(Name);
     }
 
     public string Path { get; }
 
+    /// <summary>
+    /// 磁盘上**真实**的文件名。用于拼路径、读文件、位置记忆快照。
+    /// 即使它显示为乱码也必须用这个名字访问文件——换成修复后的名字会打不开。
+    /// </summary>
     public string Name { get; }
+
+    /// <summary>
+    /// 显示用文件名：乱码（GBK 字节被别的编码误解码）会在这里被还原成中文。
+    /// 列表、信息栏、悬停标题都用它；<b>不要</b>拿它去 IO。
+    /// </summary>
+    public string DisplayName { get; private set; }
+
+    /// <summary>开关变化后重算显示名（原名 <see cref="Name"/> 不受影响）。</summary>
+    public void RefreshDisplayName()
+    {
+        string want = FileNameRepair.Fix(Name);
+        if (want == DisplayName)
+        {
+            return;
+        }
+
+        DisplayName = want;
+        OnPropertyChanged(nameof(DisplayName));
+    }
 
     public EntryKind Kind { get; }
 

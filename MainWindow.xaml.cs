@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Globalization;
 using System.Threading;
@@ -441,10 +441,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
             if (_curB < 0 || _curB >= _items.Count)
             {
-                return _items[_cur].Name;
+                return _items[_cur].DisplayName;
             }
 
-            return _items[_cur].Name + "  ＋  " + _items[_curB].Name;
+            return _items[_cur].DisplayName + "  ＋  " + _items[_curB].DisplayName;
         }
     }
 
@@ -813,7 +813,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     ApplyItems(scan.Images, FolderLabel(root), "", scan.Others);
 
                     Status = hit >= 0
-                        ? $"已回到上次的位置：{scan.Images[hit].Name}（第 {hit + 1} / {scan.Images.Count} 张 · {FolderLabel(root)}）"
+                        ? $"已回到上次的位置：{scan.Images[hit].DisplayName}（第 {hit + 1} / {scan.Images.Count} 张 · {FolderLabel(root)}）"
                         : $"已恢复上次的目录（{scan.Images.Count} 张 · {FolderLabel(root)}）；上次那张照片已不在，从第 1 张开始";
                     restored = true;
                 }
@@ -945,7 +945,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (i >= 0)
             {
                 Select(i);
-                Status = $"已回到上次位置：第 {i + 1} / {_items.Count} 张 · {_items[i].Name}";
+                Status = $"已回到上次位置：第 {i + 1} / {_items.Count} 张 · {_items[i].DisplayName}";
                 return;
             }
 
@@ -1335,7 +1335,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 return dirRank;
             }
 
-            int r = cmp(a.Name, b.Name);
+            int r = cmp(a.DisplayName, b.DisplayName);
             return _sortDesc ? -r : r;
         }
 
@@ -1349,7 +1349,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         list.Sort((a, b) =>
         {
-            int r = cmp(a.Name, b.Name);
+            int r = cmp(a.DisplayName, b.DisplayName);
             return _sortDesc ? -r : r;
         });
     }
@@ -3971,14 +3971,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             if (_failed.Add(entry.Path))
             {
-                Status = $"{entry.Name} 无法预览";
+                Status = $"{entry.DisplayName} 无法预览";
             }
 
             return;
         }
 
         HoverThumbImage.Source = src;
-        HoverThumbLabel.Text = $"{entry.Name} · {entry.SizeText}";
+        HoverThumbLabel.Text = $"{entry.DisplayName} · {entry.SizeText}";
         HoverThumb.IsOpen = true;
         PlaceHoverThumb();
     }
@@ -4083,7 +4083,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (row.IsFile)
         {
             // 灰色行只是让人看见「这儿还有这么个文件」，点了给一句提示就够
-            Status = $"「{row.Name}」不是可预览的图片格式";
+            Status = $"「{row.DisplayName}」不是可预览的图片格式";
             return;
         }
 
@@ -4372,6 +4372,28 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     /// <summary>把新取值推给解码 / 渲染链路，并让改动立刻作用到正在看的那张图。</summary>
+    /// <summary>
+    /// 开关变化后重算所有显示名（列表里的每一行 + 可翻阅序列的每一项），并刷新信息栏。
+    ///
+    /// 只动 <c>DisplayName</c>：<c>Path</c> / <c>Name</c> 一律保留磁盘上的原始名字，
+    /// 拿修复后的名字去拼路径会直接打不开文件。
+    /// 两套集合都要重算——它们引用同一批文件但是两套对象，各自维护自己的显示名。
+    /// </summary>
+    private void RefreshEntryNames()
+    {
+        foreach (ImageItem it in _items)
+        {
+            it.RefreshDisplayName();
+        }
+
+        foreach (FsEntry e in _entries)
+        {
+            e.RefreshDisplayName();
+        }
+
+        OnPropertyChanged(nameof(CurName));
+    }
+
     private void ApplyOptions()
     {
         _opts.Push();
@@ -4386,6 +4408,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         // EXIF 开关变了，之前按旧策略探出来的朝向就作废了，得重新探
         _probeCache.Clear();
+
+        RefreshEntryNames();
 
         if (_cur >= 0 && _cur < _items.Count)
         {

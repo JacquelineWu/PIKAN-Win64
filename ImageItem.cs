@@ -23,13 +23,33 @@ public sealed class ImageItem : INotifyPropertyChanged
         {
             Name = path;
         }
+
+        DisplayName = FileNameRepair.Fix(Name);
     }
 
     /// <summary>文件绝对路径（鸿蒙版的 uri）。</summary>
     public string Path { get; }
 
-    /// <summary>显示用文件名。</summary>
+    /// <summary>磁盘上**真实**的文件名。用于拼路径、读文件、位置记忆。</summary>
     public string Name { get; }
+
+    /// <summary>
+    /// 显示用文件名（乱码会被还原成中文）。仅用于展示，<b>不要</b>拿去 IO。
+    /// </summary>
+    public string DisplayName { get; private set; }
+
+    /// <summary>开关变化后重算显示名（原名 <see cref="Name"/> 不受影响）。</summary>
+    public void RefreshDisplayName()
+    {
+        string want = FileNameRepair.Fix(Name);
+        if (want == DisplayName)
+        {
+            return;
+        }
+
+        DisplayName = want;
+        OnPropertyChanged(nameof(DisplayName));
+    }
 
     /// <summary>文件字节数，未知为 -1。</summary>
     public long Size

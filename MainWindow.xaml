@@ -153,9 +153,11 @@
                                             <ColumnDefinition Width="{Binding DateColWidth, RelativeSource={RelativeSource AncestorType=Window}}" />
                                         </Grid.ColumnDefinitions>
 
-                                        <!-- 文件名：不显示缩略图，避免为列表格白白解码上千张小图 -->
+                                        <!-- 文件名：不显示缩略图，避免为列表格白白解码上千张小图。
+                                             绑 DisplayName 而非 Name：乱码名（GBK 字节被误解码）
+                                             在这里显示还原后的文字；Name 仍用于实际读文件。 -->
                                         <TextBlock Grid.Column="0"
-                                                   Text="{Binding Name}"
+                                                   Text="{Binding DisplayName}"
                                                    FontSize="12"
                                                    Foreground="{Binding NameColor}"
                                                    FontWeight="{Binding Weight}"

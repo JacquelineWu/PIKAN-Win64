@@ -20,6 +20,7 @@ public sealed class AppOptions : INotifyPropertyChanged
     private bool _upscaleSmallToFit = true;
     private bool _instantNavigation = true;
     private bool _spreadPortrait = true;
+    private bool _repairFileNameEncoding = true;
 
     /// <summary>启用色彩管理 / ICC 配置文件支持。</summary>
     public bool ColorManage
@@ -66,6 +67,20 @@ public sealed class AppOptions : INotifyPropertyChanged
         set => Set(ref _spreadPortrait, value);
     }
 
+    /// <summary>
+    /// 修复乱码文件名（GB2312 / GBK / GB18030 / UTF-8 / Big5 / Shift-JIS 自动探测）。
+    ///
+    /// 只影响**显示**：列表、信息栏、悬停标题会显示还原后的文字；
+    /// 实际读文件仍用磁盘上的原始名字（否则会打不开）。
+    /// 探测做得很保守，正常的中文 / 西文文件名不会被改动；
+    /// 若你在整理老盘、想看看这些文件"原本叫什么"，再开这一项。
+    /// </summary>
+    public bool RepairFileNameEncoding
+    {
+        get => _repairFileNameEncoding;
+        set => Set(ref _repairFileNameEncoding, value);
+    }
+
     public event PropertyChangedEventHandler? PropertyChanged;
 
     private void Set(ref bool field, bool value, [CallerMemberName] string? name = null)
@@ -84,8 +99,10 @@ public sealed class AppOptions : INotifyPropertyChanged
     {
         Decoder.ColorManage = _colorManage;
         Decoder.ReadExifOrientation = _exifRotate;
+        FileNameRepair.Enabled = _repairFileNameEncoding;
     }
 
     public override string ToString() =>
-        $"ICC={_colorManage} HQ={_highQualityDownscale} EXIF={_exifRotate} 放大={_upscaleSmallToFit} 即时={_instantNavigation}";
+        $"ICC={_colorManage} HQ={_highQualityDownscale} EXIF={_exifRotate} 放大={_upscaleSmallToFit} " +
+        $"即时={_instantNavigation} 对开={_spreadPortrait} 修名={_repairFileNameEncoding}";
 }

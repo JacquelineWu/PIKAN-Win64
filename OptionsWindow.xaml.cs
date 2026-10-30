@@ -42,7 +42,13 @@ public partial class OptionsWindow : Window
         (nameof(AppOptions.SpreadPortrait),
          "竖图对开：连续两张竖图左右并排显示",
          "当前这张是竖图、紧挨着的下一张也是竖图时，两张并排一起显示（漫画 / 扫描件的看法），" +
-         "翻页一次跨过两页。取消则任何时候都只显示一张。")
+         "翻页一次跨过两页。取消则任何时候都只显示一张。"),
+
+        (nameof(AppOptions.RepairFileNameEncoding),
+         "修复乱码文件名（GBK / GB18030 / UTF-8 自动探测）",
+         "有些文件的名字当年是用 GBK 编码写入、又被别的编码误读，于是磁盘上存的就成了一串乱码字符。"
+         + "开启后，列表与标题栏会把这些名字还原成原本的中文；仅用于显示——读文件仍用磁盘上的原始名字，"
+         + "不会改名、也不会因此打不开文件。探测很保守，正常的中文 / 西文文件名不会被改动。")
     };
 
     public OptionsWindow(AppOptions opts)
