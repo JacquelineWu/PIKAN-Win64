@@ -373,9 +373,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public string DirLabel => _browseDir ?? "（非目录浏览）";
 
     /// <summary>排序方向按钮上的文案。</summary>
-    public string SortDirLabel => _sortDesc ? "名称 ↓" : "名称 ↑";
+    public string SortDirLabel => _sortDesc ? "排序 ↓" : "排序 ↑";
 
-    /// <summary>「↑ 上级」按钮：只有在浏览模式且不在盘根时才可用。</summary>
+    /// <summary>「↑ 回上层」按钮：只有在浏览模式且不在盘根时才可用。</summary>
     public bool CanGoUp
     {
         get
@@ -4014,7 +4014,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         OnPropertyChanged(nameof(SortDirLabel));
         Resort();
         SaveSortPref();
-        Status = "列表按名称" + (_sortDesc ? "倒序" : "正序") + "（自然序）";
+        Status = "列表排序：" + (_sortDesc ? "倒序" : "正序") + "（自然序）";
     }
 
     private void ActUpDir(object sender, RoutedEventArgs e) => GoUp();

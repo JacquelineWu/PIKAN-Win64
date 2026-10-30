@@ -84,9 +84,9 @@
                         <WrapPanel Grid.Row="1" Orientation="Horizontal">
                             <Button Content="{Binding SortDirLabel}"
                                     Style="{StaticResource SortButton}"
-                                    ToolTip="名称正序 / 倒序切换（自然序：(1) (2) (11)）"
+                                    ToolTip="排序正序 / 倒序切换（自然序：(1) (2) (11)）"
                                     Click="ActSortDir" />
-                            <Button Content="↑ 上级"
+                            <Button Content="↑ 回上层"
                                     Style="{StaticResource SortButton}"
                                     ToolTip="回到上一级目录（退格键同效）"
                                     IsEnabled="{Binding CanGoUp}"
