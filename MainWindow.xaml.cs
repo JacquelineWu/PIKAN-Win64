@@ -3562,6 +3562,24 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// 双击档案名：与画布双击同一语义 —— 切换全屏，再双击一次恢复。
+    /// 挂在 ListBoxItem 上（MouseDoubleClick 不冒泡，只能挂到行本身）。
+    /// 第一下单击已经把这张图选开，第二下只负责进/出全屏，不改缩放。
+    /// </summary>
+    private void FileItem_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        // 只对图片行生效：双击文件夹 /「..」是导航，不该顺带进全屏
+        if ((sender as ListBoxItem)?.DataContext is not FsEntry entry ||
+            entry.Kind != FsEntry.EntryKind.Image)
+        {
+            return;
+        }
+
+        SetFull(!_fullscreen);
+        e.Handled = true;
+    }
+
     /// <summary>命中测试：鼠标下面那一行的 FsEntry（滚动条等位置返回 null）。</summary>
     private FsEntry? HitEntry(Point local)
     {
@@ -4152,7 +4170,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Finish();
     }
 
-    // ===================== 临时自检：D3D 缩放渲染探针（交付前删除） =====================
     private static void Finish()
     {
         _ = Task.Run(async () =>

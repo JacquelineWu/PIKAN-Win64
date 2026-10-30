@@ -177,6 +177,11 @@
                         </ListBox.ItemTemplate>
                         <ListBox.ItemContainerStyle>
                             <Style TargetType="ListBoxItem">
+                                <!-- 双击档案名：切全屏，再双击一次恢复。
+                                     必须挂在**每一行**上：MouseDoubleClick 是 Direct 路由事件，
+                                     只在被双击的那个 Control 自身触发、不冒泡，
+                                     所以挂到 ListBox 上是收不到行的双击的。 -->
+                                <EventSetter Event="MouseDoubleClick" Handler="FileItem_MouseDoubleClick" />
                                 <Setter Property="Padding" Value="0" />
                                 <Setter Property="Margin" Value="0,0,0,2" />
                                 <Setter Property="HorizontalContentAlignment" Value="Stretch" />
