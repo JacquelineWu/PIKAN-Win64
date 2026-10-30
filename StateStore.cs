@@ -50,9 +50,6 @@ public sealed class AppState
     /// <summary>档案列表是否倒序（false = 名称从 A 到 Z）。</summary>
     public bool SortDesc { get; set; }
 
-    /// <summary>是否按自然序（一开就是 true：(1) (2) (11) 而不是 (1) (11) (2)）。</summary>
-    public bool NaturalSort { get; set; } = true;
-
     /// <summary>左侧档案列表拖出来的宽度（布局单位）；0 = 没拖过，用默认宽度。</summary>
     public double ListWidth { get; set; }
 

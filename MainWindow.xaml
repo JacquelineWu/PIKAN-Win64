@@ -80,18 +80,12 @@
                                    ToolTip="{Binding DirLabel}"
                                    Margin="0,0,0,6" />
 
-                        <!-- 窄栏（最小 260）时四个按钮放不下一行，用 WrapPanel 自动换行 -->
+                        <!-- 窄栏（最小 260）时三个按钮放不下一行，用 WrapPanel 自动换行 -->
                         <WrapPanel Grid.Row="1" Orientation="Horizontal">
                             <Button Content="{Binding SortDirLabel}"
                                     Style="{StaticResource SortButton}"
-                                    ToolTip="名称正序 / 倒序切换"
+                                    ToolTip="名称正序 / 倒序切换（自然序：(1) (2) (11)）"
                                     Click="ActSortDir" />
-                            <Button Content="自然序"
-                                    Style="{StaticResource SortButton}"
-                                    ToolTip="按数字大小排：(1) (2) (11) 而不是 (1) (11) (2)"
-                                    Background="{Binding NaturalBackground}"
-                                    Foreground="{Binding NaturalForeground}"
-                                    Click="ActNatural" />
                             <Button Content="↑ 上级"
                                     Style="{StaticResource SortButton}"
                                     ToolTip="回到上一级目录（退格键同效）"

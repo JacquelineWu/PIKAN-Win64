@@ -135,8 +135,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private string? _browseDir;
 
     // ---- 列表排序 ----
+    // 名称一律走自然序（(1) (2) (11) 按数字大小排），不再提供逐字符开关
     private bool _sortDesc;
-    private bool _naturalSort = true;
 
     // ---- 视图变换状态 ----
     private double _zoom = 1;
@@ -333,10 +333,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         // 列表排序沿用上次的偏好
         _sortDesc = _state.SortDesc;
-        _naturalSort = _state.NaturalSort;
         OnPropertyChanged(nameof(SortDirLabel));
-        OnPropertyChanged(nameof(NaturalBackground));
-        OnPropertyChanged(nameof(NaturalForeground));
 
         // 「选项」里的五项开关同样沿用上次设置（缺字段的旧 state.json 会拿到默认全开）
         _opts = _state.Options ?? new AppOptions();
@@ -361,10 +358,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     /// <summary>排序方向按钮上的文案。</summary>
     public string SortDirLabel => _sortDesc ? "名称 ↓" : "名称 ↑";
-
-    public string NaturalBackground => _naturalSort ? "#4fd1c5" : "#2a2f3a";
-
-    public string NaturalForeground => _naturalSort ? "#101216" : "#e8ecf4";
 
     /// <summary>「↑ 上级」按钮：只有在浏览模式且不在盘根时才可用。</summary>
     public bool CanGoUp
@@ -1169,15 +1162,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 按当前规则（方向 + 是否自然序）给一堆名称排序。
+    /// 按当前规则（方向 + 自然序）给一堆名称排序。
     /// 目录与图片分开排、然后目录在前——这是资源管理器的惯例，
     /// 混在一起会让「往下走一层的入口」散落在几百张图片中间。
     /// </summary>
     private void SortEntries(List<FsEntry> list)
     {
-        Comparison<string> cmp = _naturalSort
-            ? NaturalSort.Compare
-            : string.CompareOrdinal;
+        Comparison<string> cmp = NaturalSort.Compare;
 
         int Compare(FsEntry a, FsEntry b)
         {
@@ -1205,9 +1196,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>给「可翻阅的图片序列」排序（就是左侧图片行的那部分，不含目录）。</summary>
     private void SortImages(List<ImageItem> list)
     {
-        Comparison<string> cmp = _naturalSort
-            ? NaturalSort.Compare
-            : string.CompareOrdinal;
+        Comparison<string> cmp = NaturalSort.Compare;
 
         list.Sort((a, b) =>
         {
@@ -3651,19 +3640,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         OnPropertyChanged(nameof(SortDirLabel));
         Resort();
         SaveSortPref();
-        Status = "列表按名称" + (_sortDesc ? "倒序" : "正序") + (_naturalSort ? "（自然序）" : "");
-    }
-
-    private void ActNatural(object sender, RoutedEventArgs e)
-    {
-        _naturalSort = !_naturalSort;
-        OnPropertyChanged(nameof(NaturalBackground));
-        OnPropertyChanged(nameof(NaturalForeground));
-        Resort();
-        SaveSortPref();
-        Status = _naturalSort
-            ? "已按自然序排列：(1) (2) (10) (11) 这种数字会按大小排"
-            : "已按逐字符排列：(1) (11) (2) 这种数字按字符排";
+        Status = "列表按名称" + (_sortDesc ? "倒序" : "正序") + "（自然序）";
     }
 
     private void ActUpDir(object sender, RoutedEventArgs e) => GoUp();
@@ -3672,7 +3649,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void SaveSortPref()
     {
         _state.SortDesc = _sortDesc;
-        _state.NaturalSort = _naturalSort;
         _state.Save();
     }
 
