@@ -1790,8 +1790,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 下一格落在哪一张。单页时就是 ±1；正在对开时一次跨过两页——
-    /// 前进跳到右页的下一张，后退跳到左页的前一张（落点再当新的一对的左页）。
+    /// 下一格落在哪一张 —— 永远是 ±delta 张，一次只挪一格。
+    ///
+    /// 即使这一屏正并排显示两张也不许跨：跨了就等于按一下跳两张，中间那张被跳过。
+    /// 并排只是「多看一张」，落点仍按单张推进（[1,2] → 按一下 → [2,3] → [3,4] …），
+    /// 与在列表里点任意一张当左页的行为一致。
     /// </summary>
     private int NextIndex(int delta)
     {
@@ -1801,13 +1804,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return 0;
         }
 
-        int from = _cur < 0 ? 0 : _cur;
-        if (_curB < 0)
-        {
-            return WrapIndex(from + delta, n);
-        }
-
-        return WrapIndex(delta > 0 ? _curB + 1 : from - 1, n);
+        return WrapIndex((_cur < 0 ? 0 : _cur) + delta, n);
     }
 
     /// <summary>
