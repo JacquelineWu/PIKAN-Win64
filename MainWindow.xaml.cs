@@ -1721,7 +1721,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        // 点到的这张可能属于某一对（甚至是右页），按配对结果决定这一屏显示几张
+        // 点到的这张固定当左页：配得上就把下一张放右边，配不上就单页
         (int a, int b) = PairFor(idx);
         _cur = a;
         ResetView();
@@ -1771,7 +1771,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         int target = NextIndex(delta);
         Perf.Start($"Go {delta}  → 第 {target + 1} 张");
 
-        // 落点可能本身是「右页」（往回翻时），PairFor 会把它归回自己那一对
+        // 落点永远当左页：往回翻时这一屏就是「前一张 + 当前这张」，与点列表的行为一致
         (int a, int b) = PairFor(target);
         _cur = a;
         ResetView();
@@ -1791,7 +1791,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     /// <summary>
     /// 下一格落在哪一张。单页时就是 ±1；正在对开时一次跨过两页——
-    /// 前进跳到右页的下一张，后退跳到左页的前一张（再由 PairFor 归位到那一对）。
+    /// 前进跳到右页的下一张，后退跳到左页的前一张（落点再当新的一对的左页）。
     /// </summary>
     private int NextIndex(int delta)
     {
@@ -1811,12 +1811,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 第 idx 张该跟谁一起显示：连续竖图在**段内**两两配对（[0,1] [2,3] …），横图永远单张。
-    /// 返回 (左页, 右页)，右页为 -1 表示单页。
+    /// 第 idx 张该跟谁一起显示：**这一张固定当左页**，下一张配得上就并排，配不上就单页。
+    /// 返回 (左页, 右页)，右页为 -1 表示单页。横图永远单张。
     ///
-    /// 为什么要按段对齐而不是「当前 + 下一张」的滑动窗口：
-    /// 滑动窗口会让同一张图先出现在右边、下一次翻页又出现在左边，
-    /// 看一页跳一格的漫画式阅读就变成看两遍。
+    /// 为什么「点哪张哪张就在左边」而不是按连续竖图段固定分组（[0,1] [2,3] …）：
+    /// 固定分组下点列表里的第 2 张，它属于 [0,1] 这一对、只能显示在右边，
+    /// 列表高亮还会跳回第 1 张——等于右页那一张根本选不中。
+    /// 以落点为基准重新分组后，列表里任何一张都能直接选中，
+    /// 后面的图接着顺序排下去（[idx,idx+1] [idx+2,idx+3] …）。
     /// </summary>
     private (int A, int B) PairFor(int idx)
     {
@@ -1831,25 +1833,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return (idx, -1);
         }
 
-        // 往前退到这一段连续竖图的起点，用「段内偏移的奇偶」决定它是左页还是右页
-        int s = idx;
-        while (s - 1 >= 0 && PairsWith(s - 1, self))
-        {
-            s--;
-        }
-
-        if ((idx - s) % 2 == 1)
-        {
-            return (idx - 1, idx); // 它是右页
-        }
-
-        // 它是左页：下一张配得上就并排
-        if (idx + 1 < _items.Count && PairsWith(idx + 1, self))
-        {
-            return (idx, idx + 1);
-        }
-
-        return (idx, -1);
+        // 下一张同为竖图、且 EXIF 变换一致（否则两页没法共用同一个基准旋转）→ 并排
+        return idx + 1 < _items.Count && PairsWith(idx + 1, self) ? (idx, idx + 1) : (idx, -1);
     }
 
     /// <summary>第 idx 张能不能和 self 配成一对：同为竖图，且 EXIF 变换一致
