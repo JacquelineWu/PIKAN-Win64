@@ -1151,103 +1151,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         // zoom 已烤进布局宽高时（缩放停稳后的精修态），RenderTransform 只剩镜像方向；
         // 低清占位层从不烤，永远跟 _zoom 走。
-        // 全景（拖拽平移中）例外：一律按 1 倍画，先看到整张图才好定位。
-        double zs = _pano ? 1 : (_zoomBaked ? 1 : _zoom);
+        double zs = _zoomBaked ? 1 : _zoom;
         _mainScale.ScaleX = zs * (TotalFlipH ? -1 : 1);
         _mainScale.ScaleY = zs * (_flipV ? -1 : 1);
 
         // 低清占位层与主层用同样的变换（早期版本这里有过对焦呼吸缩放，已移除）
-        double lz = _pano ? 1 : _zoom;
-        _lowScale.ScaleX = lz * (TotalFlipH ? -1 : 1);
-        _lowScale.ScaleY = lz * (_flipV ? -1 : 1);
+        _lowScale.ScaleX = _zoom * (TotalFlipH ? -1 : 1);
+        _lowScale.ScaleY = _zoom * (_flipV ? -1 : 1);
 
         Matrix m = new();
-        m.Translate(_pano ? 0 : _tx, _pano ? 0 : _ty);
+        m.Translate(_tx, _ty);
         m.RotateAt(TotalRot, cw / 2, ch / 2);
         Viewport.RenderTransform = new MatrixTransform(m);
-
-        UpdatePanoBox(cw, ch);
-    }
-
-    /// <summary>
-    /// 全景框：放大后拖拽平移时，画面临时缩回整图，这个框标出松手后会看到的区域。
-    ///
-    /// 推导：放大 z 倍、平移 t 时，图片点 p 落在屏幕 C + t + z·p（C = 画布中心，
-    /// 旋转在这里正好抵消）。把它反解成「画布盖住哪块图片」再乘回 1 倍，
-    /// 得到框中心 C − t/z、尺寸 画布/z —— 与旋转、镜像都无关，永远是轴对齐矩形。
-    /// </summary>
-    private void UpdatePanoBox(double cw, double ch)
-    {
-        if (!_pano)
-        {
-            return;
-        }
-
-        double z = _zoom < 0.01 ? 1 : _zoom;
-        double vw = cw / z;
-        double vh = ch / z;
-        double left = (cw / 2) - (_tx / z) - (vw / 2);
-        double top = (ch / 2) - (_ty / z) - (vh / 2);
-
-        // 没旋转时把框裁到图片范围内，免得框飘到图外的灰底上看着像错位
-        if (TotalRot % 360 == 0 && MainImage.Width > 0 && MainImage.Height > 0)
-        {
-            double il = (cw / 2) - (MainImage.Width / 2);
-            double it = (ch / 2) - (MainImage.Height / 2);
-            double l2 = Math.Max(left, il);
-            double t2 = Math.Max(top, it);
-            double r2 = Math.Min(left + vw, il + MainImage.Width);
-            double b2 = Math.Min(top + vh, it + MainImage.Height);
-
-            if (r2 - l2 > 0.5 && b2 - t2 > 0.5)
-            {
-                left = l2;
-                top = t2;
-                vw = r2 - l2;
-                vh = b2 - t2;
-            }
-        }
-
-        PanoBox.Width = Math.Max(1, vw);
-        PanoBox.Height = Math.Max(1, vh);
-        Canvas.SetLeft(PanoBox, left);
-        Canvas.SetTop(PanoBox, top);
-    }
-
-    /// <summary>
-    /// 进入全景：拖拽平移一开始就缩回整图（只在真的放大了时才有意义）。
-    /// 烤进布局宽高的 zoom 必须先取出来，否则「1 倍」画出来仍是放大后的尺寸。
-    /// </summary>
-    private void EnterPano()
-    {
-        if (_pano || _zoom <= 1.01 || _cur < 0)
-        {
-            return;
-        }
-
-        UnbakeZoom();
-        _pano = true;
-        PanoLayer.Visibility = Visibility.Visible;
-        UpdateTransform();
-    }
-
-    /// <summary>松手 / 换图：回到放大后的局部，平移量已经按鼠标改好了。</summary>
-    private void ExitPano()
-    {
-        if (!_pano)
-        {
-            return;
-        }
-
-        _pano = false;
-        PanoLayer.Visibility = Visibility.Collapsed;
-        UpdateTransform();
-        ScheduleRefine();
     }
 
     private void ResetView()
     {
-        ExitPano();      // 换图 / 复位时若还停在全景，先退出来
         UnbakeZoom();
         _zoom = 1;
         _tx = 0;
@@ -1868,7 +1787,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>把一张已解码的图放上主视图（预载命中 / 高清到达都走这里）。</summary>
     private void ShowDecoded(DecodedImage img)
     {
-        ExitPano();      // 拖到一半翻了页：别把全景状态带进新图
         NoteShown(img.Path);
         Perf.Tick("NoteShown");
         _viewOwned = img;
@@ -1924,9 +1842,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>true = zoom 已烤进布局宽高（缩放停稳后的精修态），RenderTransform 只剩镜像。</summary>
     private bool _zoomBaked;
 
-    /// <summary>拖拽平移中：画面临时缩回整图，好知道自己在图的哪个位置。</summary>
-    private bool _pano;
-
     /// <summary>
     /// 缩放交互开始：把 zoom 从布局宽高里解冻，恢复 RenderTransform 缩放，
     /// 滚轮/捏合才有即时反馈。几何与变换互补，画面不会跳。
@@ -1952,8 +1867,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// </summary>
     private void BakeZoom()
     {
-        // 全景（拖拽平移）期间画面按 1 倍画，烤进去就缩不回整图了
-        if (_zoomBaked || _pano || _viewOwned is null)
+        if (_zoomBaked || _viewOwned is null)
         {
             return;
         }
@@ -3085,7 +2999,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             (Math.Abs(p.X - _pressX) > ClickMoveTol || Math.Abs(p.Y - _pressY) > ClickMoveTol))
         {
             _pressMoved = true;
-            EnterPano();     // 放大后拖拽：先缩回整图，看得见自己在图的哪儿
         }
 
         if (_pressMoved)
@@ -3111,11 +3024,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         if (moved)
         {
-            ExitPano();  // 松手：回到放大后的局部
-            return;      // 拖拽平移，不算点击
+            return; // 拖拽平移，不算点击
         }
-
-        ExitPano();
 
         // 双击：先把刚才那一下单击（放大 / 还原）造成的视图变化撤回去，再切全屏。
         // 不撤的话双击进出全屏会顺带把图放大一级，退出全屏后画面回不到原样。
@@ -3139,9 +3049,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             Status = "已还原（适应窗口）";
         }
     }
-
-    /// <summary>拖拽途中鼠标捕获被系统收走（Alt+Tab 等）时别卡在全景里。</summary>
-    private void CanvasArea_LostCapture(object sender, MouseEventArgs e) => ExitPano();
 
     /// <summary>点击前的视图状态快照，供双击时撤销那一下单击。</summary>
     private double _snapZoom = 1;
