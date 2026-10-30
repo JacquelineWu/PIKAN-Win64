@@ -121,9 +121,12 @@
                              Background="Transparent"
                              BorderThickness="0"
                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             ScrollViewer.ScrollChanged="FileList_ScrollChanged"
                              VirtualizingStackPanel.IsVirtualizing="True"
                              VirtualizingPanel.VirtualizationMode="Standard"
                              SelectionChanged="FileList_SelectionChanged"
+                             PreviewMouseMove="FileList_PreviewMouseMove"
+                             MouseLeave="FileList_MouseLeave"
                              SizeChanged="FileList_SizeChanged">
                         <ListBox.ItemTemplate>
                             <DataTemplate>
@@ -416,5 +419,37 @@
                 </StackPanel>
             </Grid>
         </Border>
+
+        <!-- ===================== 悬停缩略图 =====================
+             鼠标停在左侧档案名上时，在鼠标旁边浮出这张图的小图。
+             图优先取自预载缓存（当前位置前后各 20 张已经解码好了），
+             没命中才后台解一张 384 边长的小图——不打断翻页，也不挤占主缓存。
+             用 Popup 而不是 Grid 内浮层：它能探出窗口边界，也不会被列表裁掉。 -->
+        <Popup x:Name="HoverThumb"
+               AllowsTransparency="True"
+               IsHitTestVisible="False"
+               StaysOpen="True"
+               Placement="Absolute">
+            <Border x:Name="HoverThumbBox"
+                    Background="#F2161A21"
+                    BorderBrush="#3a4250"
+                    BorderThickness="1"
+                    CornerRadius="6"
+                    Padding="6">
+                <StackPanel>
+                    <Image x:Name="HoverThumbImage"
+                           Stretch="Uniform"
+                           MaxWidth="220"
+                           MaxHeight="220"
+                           RenderOptions.BitmapScalingMode="HighQuality" />
+                    <TextBlock x:Name="HoverThumbLabel"
+                               FontSize="11"
+                               Foreground="#8b95a8"
+                               MaxWidth="220"
+                               Margin="0,4,0,0"
+                               TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+            </Border>
+        </Popup>
     </Grid>
 </Window>

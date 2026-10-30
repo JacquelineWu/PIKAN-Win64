@@ -123,6 +123,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly DispatcherTimer _slideTimer = new();
     private readonly DispatcherTimer _posTimer = new() { Interval = TimeSpan.FromMilliseconds(PosSaveMs) };
 
+    /// <summary>鼠标停在一行上多久才取缩略图（快速划过整列时不该连解几十张）。</summary>
+    private readonly DispatcherTimer _hoverTimer = new() { Interval = TimeSpan.FromMilliseconds(140) };
+
+    /// <summary>当前悬停的那一行（同一行内移动只挪位置，不重取图）。</summary>
+    private FsEntry? _hoverEntry;
+
+    /// <summary>最近一次鼠标位置（屏幕设备像素），缩略图就摆在它右下角。</summary>
+    private Point _hoverMouse;
+
+    /// <summary>取图序号：异步解码回来的路上鼠标可能早已划走，靠它丢弃过期结果。</summary>
+    private int _hoverSeq;
+
     // ---- 档案 ----
     private string _sourceLabel = "尚未打开";
     private int _cur = -1;
@@ -315,6 +327,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _slideTimer.Interval = TimeSpan.FromMilliseconds(SlideIntervalMs);
         _slideTimer.Tick += (_, _) => Go(1);
         _posTimer.Tick += (_, _) => { _posTimer.Stop(); FlushPos(); };
+        _hoverTimer.Tick += HoverTimer_Tick;
 
         Loaded += (_, _) => UpdateTransform();
         Closed += (_, _) => Perf.FlushSync();
@@ -962,6 +975,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         ClearBlur();
         _previews.Clear();
         _failed.Clear();
+        HoverThumbCache.Instance.Clear();   // 悬停缩略图跟着一起清，不占着旧目录的内存
+        HideHoverThumb();
         GpuImageCache.Instance.Clear();   // 换图库：显存里那批一起释放
         GpuResampler.ClearResults();
 
@@ -3069,6 +3084,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void Window_MouseLeave(object sender, MouseEventArgs e)
     {
         SetTopHover(false);
+        HideHoverThumb();   // 鼠标离开窗口：缩略图不能留在屏幕上
     }
 
     private void SetTopHover(bool near)
@@ -3344,6 +3360,162 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _navQuietUntil = now + NavQuietMs;
         return true;
     }
+
+    // ==================== 悬停缩略图 ====================
+    // 鼠标停在左侧档案名上时，在鼠标旁边浮出这张图的小图。
+    // 图优先取自预载缓存（当前位置前后各 20 张已经解码好了，直接拿），
+    // 没命中才后台解一张 384 的小图，并进悬停自己的小缓存（不挤占主预载缓存）。
+
+    private void FileList_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        // 按着键的时候鼠标是在做别的事（拖列表 / 拖分隔条），不弹
+        if (e.LeftButton == MouseButtonState.Pressed || e.RightButton == MouseButtonState.Pressed)
+        {
+            HideHoverThumb();
+            return;
+        }
+
+        FsEntry? entry = HitEntry(e.GetPosition(FileList));
+        if (entry is null || !entry.IsImage)
+        {
+            // 目录行与不支持预览的文件不弹（灰色的那些本来就没有图可看）
+            HideHoverThumb();
+            return;
+        }
+
+        _hoverMouse = PointToScreen(e.GetPosition(this));
+
+        if (!ReferenceEquals(entry, _hoverEntry))
+        {
+            // 换了一行：先收起旧的，停稳 140ms 再取新图
+            HideHoverThumb();
+            _hoverEntry = entry;
+            _hoverTimer.Stop();
+            _hoverTimer.Start();
+            return;
+        }
+
+        // 同一行内移动：图不动，框跟着鼠标走
+        if (HoverThumb.IsOpen)
+        {
+            PlaceHoverThumb();
+        }
+    }
+
+    /// <summary>命中测试：鼠标下面那一行的 FsEntry（滚动条等位置返回 null）。</summary>
+    private FsEntry? HitEntry(Point local)
+    {
+        if (FileList.InputHitTest(local) is not DependencyObject hit)
+        {
+            return null;
+        }
+
+        DependencyObject? d = hit;
+        while (d is not null && d is not ListBoxItem)
+        {
+            d = VisualTreeHelper.GetParent(d);
+        }
+
+        return (d as ListBoxItem)?.DataContext as FsEntry;
+    }
+
+    private async void HoverTimer_Tick(object? sender, EventArgs e)
+    {
+        _hoverTimer.Stop();
+        FsEntry? entry = _hoverEntry;
+        if (entry is null || !entry.IsImage)
+        {
+            return;
+        }
+
+        int seq = ++_hoverSeq;
+        BitmapSource? src = null;
+        try
+        {
+            src = await HoverThumbCache.Instance.GetAsync(entry.Path, _previews, _opts.ExifRotate);
+        }
+        catch (Exception ex)
+        {
+            GpuAccel.WriteLog("hover thumb 取图失败 " + ex.Message);
+        }
+
+        // 回来的路上鼠标可能早已划走／换了目录，结果作废
+        if (seq != _hoverSeq || !ReferenceEquals(entry, _hoverEntry))
+        {
+            return;
+        }
+
+        if (src is null)
+        {
+            if (_failed.Add(entry.Path))
+            {
+                Status = $"{entry.Name} 无法预览";
+            }
+
+            return;
+        }
+
+        HoverThumbImage.Source = src;
+        HoverThumbLabel.Text = $"{entry.Name} · {entry.SizeText}";
+        HoverThumb.IsOpen = true;
+        PlaceHoverThumb();
+    }
+
+    /// <summary>
+    /// 把缩略图框摆到鼠标右下角；贴到屏幕边缘时翻到另一侧，别被任务栏吃掉。
+    ///
+    /// 单位注意：Popup 的 Absolute 定位收的是**布局单位**（实测：设 168 在 125% DPI 下
+    /// 实际落在 210px = 168×1.25），所以这里全程用 DIP 算，鼠标位置从设备像素换回来。
+    /// </summary>
+    private void PlaceHoverThumb()
+    {
+        HoverThumbBox.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
+        System.Windows.Size sz = HoverThumbBox.DesiredSize;   // 布局单位
+
+        double dpi = DpiFactor;
+        double mx = _hoverMouse.X / dpi;   // 鼠标（屏幕 DIP）
+        double my = _hoverMouse.Y / dpi;
+
+        System.Drawing.Rectangle wa = Forms.Screen
+            .FromPoint(new System.Drawing.Point((int)_hoverMouse.X, (int)_hoverMouse.Y))
+            .WorkingArea;
+        double left = wa.Left / dpi;
+        double right = wa.Right / dpi;
+        double top = wa.Top / dpi;
+        double bottom = wa.Bottom / dpi;
+
+        // 与鼠标的间距同样要换回布局单位，否则 18 会被当成 18 DIP（125% DPI 下就变成 22.5px）
+        double gap = 18 / dpi;
+        double x = mx + gap;
+        double y = my + gap + (2 / dpi);
+
+        if (x + sz.Width > right)
+        {
+            x = mx - sz.Width - gap;      // 右边放不下就翻到鼠标左边
+        }
+
+        if (y + sz.Height > bottom)
+        {
+            y = bottom - sz.Height - 8;   // 下面放不下就往上顶
+        }
+
+        HoverThumb.HorizontalOffset = Math.Max(left + 4, x);
+        HoverThumb.VerticalOffset = Math.Max(top + 4, y);
+    }
+
+    private void HideHoverThumb()
+    {
+        _hoverTimer.Stop();
+        _hoverEntry = null;
+        _hoverSeq++;          // 让在路上的解码结果作废
+        HoverThumb.IsOpen = false;
+        HoverThumbImage.Source = null;
+    }
+
+    private void FileList_MouseLeave(object sender, MouseEventArgs e) => HideHoverThumb();
+
+    /// <summary>列表滚动：屏幕坐标下的行已经换了，先收起，等鼠标再动一次重新判定。</summary>
+    private void FileList_ScrollChanged(object sender, ScrollChangedEventArgs e) => HideHoverThumb();
 
     /// <summary>
     /// 左侧点一下：图片立刻上右边显示；子文件夹直接进；「..」回上一级。
