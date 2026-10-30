@@ -47,8 +47,9 @@
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
 
-                    <!-- 抬头：当前来源 + 张数 -->
-                    <Grid Grid.Row="0" Margin="12,10,12,6">
+                    <!-- 抬头：当前来源 + 张数（收起时连这行一起藏掉） -->
+                    <Grid Grid.Row="0" Margin="12,10,12,6"
+                          Visibility="{Binding ListHeaderVisibility}">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
@@ -65,8 +66,10 @@
                                    Foreground="#7f88a3" />
                     </Grid>
 
-                    <!-- 当前目录 + 排序控件 -->
-                    <Grid Grid.Row="1" Margin="12,0,12,8">
+                    <!-- 当前目录 + 排序控件（收起时藏掉：三个按钮要占一整行，
+                         留着就违背"只剩档案名"的初衷了） -->
+                    <Grid Grid.Row="1" Margin="12,0,12,8"
+                          Visibility="{Binding ListHeaderVisibility}">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
@@ -98,12 +101,14 @@
                         </WrapPanel>
                     </Grid>
 
-                    <!-- 列标题：三列宽度与列表行绑的是同一组属性，永远对齐 -->
+                    <!-- 列标题：三列宽度与列表行绑的是同一组属性，永远对齐。
+                         第 4 列是折叠按钮，两种状态都在，收起后拿它展回来。 -->
                     <Grid Grid.Row="2" Margin="14,0,12,4">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="{Binding NameColWidth}" />
                             <ColumnDefinition Width="{Binding SizeColWidth}" />
                             <ColumnDefinition Width="{Binding DateColWidth}" />
+                            <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock Grid.Column="0" Text="档案名" FontSize="10" Foreground="#6b7488" />
                         <TextBlock Grid.Column="1" Text="大小" FontSize="10" Foreground="#6b7488"
@@ -111,6 +116,14 @@
                                    ToolTip="图片显示字节数（原始 byte）；文件夹显示内含全部文件的总容量" />
                         <TextBlock Grid.Column="2" Text="日期" FontSize="10" Foreground="#6b7488"
                                    HorizontalAlignment="Right" Margin="10,0,0,0" />
+                        <Button x:Name="ListCollapseBtn"
+                                Grid.Column="3"
+                                Content="{Binding ListCollapseGlyph}"
+                                ToolTip="{Binding ListCollapseTip}"
+                                Click="ActToggleList"
+                                Style="{StaticResource SortButton}"
+                                Width="24" Height="16" FontSize="10"
+                                Margin="4,0,0,0" Padding="0" />
                     </Grid>
 
                     <!-- 档案列表：虚拟化，只为屏幕上的几行建节点 -->

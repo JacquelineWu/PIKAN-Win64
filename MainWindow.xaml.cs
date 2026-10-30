@@ -214,6 +214,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private double _dateColW = 104;
     private bool _measuringCols;
 
+    /// <summary>
+    /// 档案列表是否收起。
+    ///
+    /// 收起时左栏压到 ListCollapsedWidth（远低于 ListMinWidth）——那条下限是给「三列都要挤得下」
+    /// 用的，收起态本来就只剩档案名一列，不该被它夹回去。
+    /// 重点是：**收起不改 _listWidth**。用户自己拖出来的展开宽度要原样留着，一点一键就能回来。
+    /// </summary>
+    private bool _listCollapsed;
+
+    /// <summary>
+    /// 收起后左栏的宽度。
+    /// 别再压了：面板 168 → 列表实测 156 → 扣掉滚动条余量后档案名列约 134，
+    /// 再减去行内边距，一行能露出一截中文文件名；再窄就只剩省略号，等于没有信息。
+    /// </summary>
+    private const double ListCollapsedWidth = 168;
+
     /// <summary>唤出热区：鼠标要压到**屏幕**顶端这段距离（物理像素）内，顶栏才浮出。
     /// 10 px 意味着得把鼠标推到显示器最上边那条线上，平时完全看不到工具条。</summary>
     private const double TopBarEdgePx = 10;
@@ -378,6 +394,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _listWidth = Math.Clamp(_state.ListWidth, ListMinWidth, ListMaxWidth);
             OnPropertyChanged(nameof(ListColumnWidth));
         }
+
+        // 列表收起状态沿用上次
+        _listCollapsed = _state.ListCollapsed;
+        OnPropertyChanged(nameof(ListColumnWidth));
+        OnPropertyChanged(nameof(ListHeaderVisibility));
+        OnPropertyChanged(nameof(ListCollapseGlyph));
+        OnPropertyChanged(nameof(ListCollapseTip));
 
         // 列表排序沿用上次的偏好
         _sortDesc = _state.SortDesc;
@@ -557,7 +580,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// </summary>
     public GridLength ListColumnWidth
     {
-        get => new(_fullscreen ? 0 : _listWidth, GridUnitType.Pixel);
+        get => new(_fullscreen ? 0 : (_listCollapsed ? ListCollapsedWidth : _listWidth), GridUnitType.Pixel);
         set
         {
             // 全屏时这一列被压成 0，TwoWay 绑定会把这个 0 回写进来。
@@ -566,6 +589,28 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (_fullscreen)
             {
                 return;
+            }
+
+            if (_listCollapsed)
+            {
+                // 收起态下这里会收到两种写入，得区分开：
+                //   ① 自己 OnPropertyChanged 引发的回显——值恰好等于 ListCollapsedWidth，忽略。
+                //   ② 用户拖了分隔条——值不等于 ListCollapsedWidth。这就是「拖一下自动展开」：
+                //      退出收起态，再让这次拖动走下面的正常流程。
+                //      好处是拖动永远有反馈，不会出现「拖了没反应」或「拖完宽度被夹回去」。
+                if (Math.Abs(value.Value - ListCollapsedWidth) < 0.5)
+                {
+                    return;
+                }
+
+                _listCollapsed = false;
+                _state.ListCollapsed = false;
+                OnPropertyChanged(nameof(ListHeaderVisibility));
+                OnPropertyChanged(nameof(ListCollapseGlyph));
+                OnPropertyChanged(nameof(ListCollapseTip));
+                OnPropertyChanged(nameof(NameColWidth));
+                OnPropertyChanged(nameof(SizeColWidth));
+                OnPropertyChanged(nameof(DateColWidth));
             }
 
             // 太窄会把三列挤没，给个下限
@@ -586,15 +631,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         get
         {
-            double rest = FileList.ActualWidth - SizeColWidth - DateColWidth - ColGap * 3 - ScrollReserve;
-            return Math.Max(48, rest);
-        }
+        // 收起态只剩一列，不该再扣那两列的间距——照扣的话 168 宽的面板里
+        // 档案名列会被挤到 92，比列表名称还短，信息全被省略号吃掉。
+        double gaps = _listCollapsed ? 0 : ColGap * 3;
+        double rest = FileList.ActualWidth - SizeColWidth - DateColWidth - gaps - ScrollReserve;
+        return Math.Max(48, rest);
+    }
     }
 
-    /// <summary>「字节」列宽度，由内容最长的一行决定。</summary>
+    /// <summary>「字节」列宽度，由内容最长的一行决定。收起时为 0——宽度归零后列里的
+    /// TextBlock 自然排不下（={0} 宽的子元素被裁剪），不必另设 Visibility，
+    /// 而省出来的宽度会被档案名列自动吃掉（见 <see cref="NameColWidth"/>）。</summary>
     public double SizeColWidth
     {
-        get => _sizeColW;
+        get => _listCollapsed ? 0 : _sizeColW;
         private set
         {
             if (Math.Abs(_sizeColW - value) < 0.5)
@@ -611,7 +661,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>「日期」列宽度，同上。</summary>
     public double DateColWidth
     {
-        get => _dateColW;
+        get => _listCollapsed ? 0 : _dateColW;
         private set
         {
             if (Math.Abs(_dateColW - value) < 0.5)
@@ -679,6 +729,40 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>面板宽度变了，档案名列要跟着吃掉/吐出这部分空间。</summary>
     private void FileList_SizeChanged(object sender, SizeChangedEventArgs e) =>
         OnPropertyChanged(nameof(NameColWidth));
+
+    /// <summary>抬头（来源 + 张数）与「目录 + 排序/回上层/选择文件夹」两行：收起时一并藏掉，
+    /// 左栏只留下档案名那一列和展开箭头。</summary>
+    public Visibility ListHeaderVisibility => _listCollapsed ? Visibility.Collapsed : Visibility.Visible;
+
+    /// <summary>折叠按钮上的箭头：» = 「再点一下就展回来」。</summary>
+    public string ListCollapseGlyph => _listCollapsed ? "»" : "«";
+
+    public string ListCollapseTip =>
+        _listCollapsed ? "展开档案列表（Ctrl+B）" : "收起档案列表，只留档案名（Ctrl+B）";
+
+    /// <summary>
+    /// 切换左栏的收起 / 展开（箭头按钮和 Ctrl+B 都走这里）。
+    ///
+    /// 只改 _listCollapsed，**不动 _listWidth**——用户拖出来的展开宽度必须原样留着，
+    /// 否则收起再展开，左栏就永远回不到他自己调好的那个宽度了。
+    /// </summary>
+    public void ToggleListCollapsed()
+    {
+        _listCollapsed = !_listCollapsed;
+        _state.ListCollapsed = _listCollapsed;
+
+        OnPropertyChanged(nameof(ListColumnWidth));
+        OnPropertyChanged(nameof(NameColWidth));
+        OnPropertyChanged(nameof(SizeColWidth));
+        OnPropertyChanged(nameof(DateColWidth));
+        OnPropertyChanged(nameof(ListHeaderVisibility));
+        OnPropertyChanged(nameof(ListCollapseGlyph));
+        OnPropertyChanged(nameof(ListCollapseTip));
+
+        Status = _listCollapsed ? "已收起档案列表" : "已展开档案列表";
+    }
+
+    private void ActToggleList(object sender, RoutedEventArgs e) => ToggleListCollapsed();
 
     public Visibility FullscreenVisibility => _fullscreen ? Visibility.Visible : Visibility.Collapsed;
     public Visibility EmptyVisibility => _cur >= 0 ? Visibility.Collapsed : Visibility.Visible;
@@ -3587,6 +3671,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (e.Key == Key.G && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
         {
             ToggleGpu();
+            e.Handled = true;
+            return;
+        }
+
+        // Ctrl+B：收起 / 展开左侧档案列表（只留档案名那一栏）
+        // B = "browse list"，跟侧栏开关的通行做法一致；Ctrl+G 也是同一套路。
+        if (e.Key == Key.B && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
+        {
+            ToggleListCollapsed();
             e.Handled = true;
             return;
         }

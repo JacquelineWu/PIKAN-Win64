@@ -53,6 +53,9 @@ public sealed class AppState
     /// <summary>左侧档案列表拖出来的宽度（布局单位）；0 = 没拖过，用默认宽度。</summary>
     public double ListWidth { get; set; }
 
+    /// <summary>档案列表是否处在「收起」状态（只留档案名一栏）。Ctrl+B 或箭头按钮切换。</summary>
+    public bool ListCollapsed { get; set; }
+
     /// <summary>用户在「选项」里勾选的看图策略（五项，默认全开）。</summary>
     public AppOptions Options { get; set; } = new();
 
