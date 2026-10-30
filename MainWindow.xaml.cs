@@ -51,9 +51,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // 放到 32 倍可覆盖到 ~400%（此刻 target 已远超位图，精修会跳过，不会多分配内存）。
     private const double MaxScale = 32.0;
 
-    // ---- 鼠标键缩放：左键 ×1.5，右键 ×2.0 ----
+    // ---- 鼠标键：左键点一下放大 50%，右键点一下还原 ----
     private const double ZoomLeft = 1.5;
-    private const double ZoomRight = 2.0;
 
     /// <summary>按下到抬起若移动超过该距离（px）就判定为拖拽平移，不触发点击缩放。</summary>
     private const double ClickMoveTol = 4;
@@ -3028,21 +3027,69 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return; // 拖拽平移，不算点击
         }
 
+        // 双击：先把刚才那一下单击（放大 / 还原）造成的视图变化撤回去，再切全屏。
+        // 不撤的话双击进出全屏会顺带把图放大一级，退出全屏后画面回不到原样。
+        if (e.ClickCount == 2)
+        {
+            UndoLastCanvasClick();
+            SetFull(!_fullscreen);
+            return;
+        }
+
         Point p = e.GetPosition(CanvasArea);
         if (btn == MouseButton.Left)
         {
-            ZoomAt(ZoomLeft, p.X, p.Y);
+            SnapshotView();               // 记下点击前的视图状态，双击时好撤销
+            ZoomAt(ZoomLeft, p.X, p.Y);   // 放大一级，锚在鼠标点上
         }
         else if (btn == MouseButton.Right)
         {
-            ZoomAt(ZoomRight, p.X, p.Y);
+            SnapshotView();
+            ResetView();                  // 还原：适应窗口 + 归位 + 清旋转翻转
+            Status = "已还原（适应窗口）";
+        }
+    }
+
+    /// <summary>点击前的视图状态快照，供双击时撤销那一下单击。</summary>
+    private double _snapZoom = 1;
+    private double _snapTx;
+    private double _snapTy;
+    private int _snapRot;
+    private bool _snapFlipH;
+    private bool _snapFlipV;
+    private bool _snapTouched;
+    private bool _snapValid;
+
+    private void SnapshotView()
+    {
+        _snapZoom = _zoom;
+        _snapTx = _tx;
+        _snapTy = _ty;
+        _snapRot = _rot;
+        _snapFlipH = _flipH;
+        _snapFlipV = _flipV;
+        _snapTouched = _viewTouched;
+        _snapValid = true;
+    }
+
+    private void UndoLastCanvasClick()
+    {
+        if (!_snapValid)
+        {
+            return;
         }
 
-        if (e.ClickCount == 2)
-        {
-            ResetView();
-            Status = "已适应窗口";
-        }
+        _snapValid = false;
+        UnbakeZoom();
+        _zoom = _snapZoom;
+        _tx = _snapTx;
+        _ty = _snapTy;
+        _rot = _snapRot;
+        _flipH = _snapFlipH;
+        _flipV = _snapFlipV;
+        _viewTouched = _snapTouched;
+        UpdateTransform();
+        RefreshImageInfo();
     }
 
     /// <summary>鼠标进入窗口顶部热区 → 浮出顶栏；离开这块或移出窗口 → 收起。</summary>

@@ -280,12 +280,12 @@
                                Foreground="#5a6272"
                                HorizontalAlignment="Center"
                                Margin="0,12,0,0" />
-                    <TextBlock Text="左键放大 50% · 右键放大 100% · 拖拽平移"
+                    <TextBlock Text="左键放大 50% · 右键还原 · 双击全屏 / 退出全屏"
                                FontSize="11"
                                Foreground="#454c5a"
                                HorizontalAlignment="Center"
                                Margin="0,6,0,0" />
-                    <TextBlock Text="双击复位 · Ctrl + 滚轮 / + − 缩放 · F11 全屏"
+                    <TextBlock Text="拖拽平移 · Ctrl + 滚轮 / + − 缩放 · F11 全屏"
                                FontSize="11"
                                Foreground="#454c5a"
                                HorizontalAlignment="Center"
