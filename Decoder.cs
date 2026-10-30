@@ -129,6 +129,64 @@ public static class Decoder
         return (frame.PixelWidth, frame.PixelHeight);
     }
 
+    /// <summary>
+    /// 只读文件头拿「转正之后」的朝向：像素尺寸 + EXIF 方向，不做完整解码。
+    /// 对开（两页并排）要靠它判断某一张是不是竖图——不能为了判朝向去解码整张图，
+    /// 那会让翻页退化成「先解两张再决定怎么显示」。
+    /// 失败一律返回 (0, 0, 1)：尺寸为 0 表示「不知道」，调用方按不可配对处理。
+    /// </summary>
+    public static (int W, int H, int Orientation) ProbeInfo(string path)
+    {
+        try
+        {
+            using FileStream fs = new(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            BitmapDecoder decoder = BitmapDecoder.Create(
+                fs,
+                BitmapCreateOptions.DelayCreation,
+                BitmapCacheOption.None);
+
+            if (decoder.Frames.Count == 0)
+            {
+                return (0, 0, 1);
+            }
+
+            BitmapFrame frame = decoder.Frames[0];
+            return (frame.PixelWidth, frame.PixelHeight, ReadOrientation(frame, path));
+        }
+        catch
+        {
+            return (0, 0, 1);
+        }
+    }
+
+    /// <summary>从已打开的帧里读方向标志（不是 EXIF 能力格式的直接返回 1）。</summary>
+    private static int ReadOrientation(BitmapFrame frame, string path)
+    {
+        if (!ReadExifOrientation || !ExifCapable.Contains(System.IO.Path.GetExtension(path)))
+        {
+            return 1;
+        }
+
+        if (frame.Metadata is not BitmapMetadata md)
+        {
+            return 1;
+        }
+
+        object? raw = md.GetQuery("System.Photo.Orientation");
+        int code = raw switch
+        {
+            ushort u => u,
+            short s => s,
+            byte b => b,
+            uint ui => (int)ui,
+            int i => i,
+            string s when int.TryParse(s, out int parsed) => parsed,
+            _ => 1
+        };
+
+        return code is >= 1 and <= 8 ? code : 1;
+    }
+
     /// <summary>读 EXIF 方向标志（1~8）；读不到返回 1（= 不用旋转）。</summary>
     private static int ProbeOrientation(string path)
     {

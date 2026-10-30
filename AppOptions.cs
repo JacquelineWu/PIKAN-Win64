@@ -19,6 +19,7 @@ public sealed class AppOptions : INotifyPropertyChanged
     private bool _exifRotate = true;
     private bool _upscaleSmallToFit = true;
     private bool _instantNavigation = true;
+    private bool _spreadPortrait = true;
 
     /// <summary>启用色彩管理 / ICC 配置文件支持。</summary>
     public bool ColorManage
@@ -53,6 +54,16 @@ public sealed class AppOptions : INotifyPropertyChanged
     {
         get => _instantNavigation;
         set => Set(ref _instantNavigation, value);
+    }
+
+    /// <summary>
+    /// 对开显示：当前是竖图、紧挨着的下一张也是竖图时，两张左右并排一起显示
+    /// （漫画 / 扫描件的看法），翻页一次跨两页。
+    /// </summary>
+    public bool SpreadPortrait
+    {
+        get => _spreadPortrait;
+        set => Set(ref _spreadPortrait, value);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

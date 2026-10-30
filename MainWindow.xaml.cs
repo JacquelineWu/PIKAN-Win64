@@ -254,9 +254,38 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private DecodedImage? _viewOwned;
     private DecodedImage? _warm;
 
+    // ---- 对开（两页并排）----
+    // 当前这张是竖图、且紧挨着的下一张也是竖图时，两张并排一起显示（漫画 / 扫描件的看法）。
+    // _viewOwned 是左页，_viewOwnedB 是右页（null = 单页）。
+    private DecodedImage? _viewOwnedB;
+
+    /// <summary>右页在 _items 里的下标（-1 = 当前是单页）。左页下标仍是 _cur。</summary>
+    private int _curB = -1;
+
+    /// <summary>两页转正之后（EXIF 方向算进去）的固有像素尺寸。</summary>
+    private (int W, int H) _sizeA;
+    private (int W, int H) _sizeB;
+
+    /// <summary>右页为了跟左页等高而要乘的倍率（= 左页高 / 右页高）。</summary>
+    private double _relB = 1;
+
+    /// <summary>两页之间的留白，取组合高度的这个比例（太高会显得两张图离得远）。</summary>
+    private const double GutterRatio = 0.02;
+
+    /// <summary>
+    /// 某张图的朝向探测结果（只读文件头得来，不解码整张）。
+    /// 按路径缓存：翻页时前后几张会反复问「是不是竖图」，不能每次都去开文件。
+    /// </summary>
+    private readonly record struct PageInfo(bool Portrait, int Rot, bool FlipH);
+
+    private readonly Dictionary<string, PageInfo> _probeCache = new(StringComparer.OrdinalIgnoreCase);
+
     // ---- GPU 加速 ----
+    // 作废代号左右页各一份：两页同时精修 / 升级时，共用一个会让先发起的那页被顶掉
     private long _refineSeq;
+    private long _refineSeqB;
     private long _upgradeSeq;
+    private long _upgradeSeqB;
 
     // ---- 预载链 ----
     private long _preloadSeq;
@@ -325,8 +354,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         // 会把窗口的首次显示一起拖住，表现出来就是「双击后毫无反应」。
         InitGpuAsync();
 
-        MainImage.RenderTransform = _mainScale;
-        LowImage.RenderTransform = _lowScale;
+        // 缩放 / 镜像挂在「页组合」这一层（不是单张 Image）：
+        // 对开时两页要作为一个整体围绕组合中心缩放，见 MainWindow.xaml 里 PagesMain 的注释。
+        PagesMain.RenderTransform = _mainScale;
+        PagesLow.RenderTransform = _lowScale;
 
         _slideTimer.Interval = TimeSpan.FromMilliseconds(SlideIntervalMs);
         _slideTimer.Tick += (_, _) => Go(1);
@@ -398,7 +429,24 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     public string CountLabel => _items.Count > 0 ? _items.Count + " 张" : "";
 
-    public string CurName => _cur >= 0 && _cur < _items.Count ? _items[_cur].Name : "未打开";
+    /// <summary>左上角那行的文件名；对开时两页的名字都列出来。</summary>
+    public string CurName
+    {
+        get
+        {
+            if (_cur < 0 || _cur >= _items.Count)
+            {
+                return "未打开";
+            }
+
+            if (_curB < 0 || _curB >= _items.Count)
+            {
+                return _items[_cur].Name;
+            }
+
+            return _items[_cur].Name + "  ＋  " + _items[_curB].Name;
+        }
+    }
 
     public string Status
     {
@@ -430,7 +478,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             string ext = _cur >= 0 && _cur < _items.Count ? _items[_cur].Ext : "";
             string size = ImageItem.FormatBytes(_bytes);
-            string dim = _imgW > 0 ? $" · {_imgW}×{_imgH}" : "";
+            // 对开时组合尺寸（_imgW×_imgH）是两页合起来的宽，看不出单张多大，
+            // 所以把两页各自的尺寸都列出来。
+            string dim = _imgW <= 0 ? "" : _viewOwnedB is not null
+                ? $" · {_sizeA.W}×{_sizeA.H} ＋ {_sizeB.W}×{_sizeB.H}"
+                : $" · {_sizeA.W}×{_sizeA.H}";
             return ext + " · " + size + dim;
         }
     }
@@ -983,9 +1035,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         _preloadSeq++;
         ClearWheel();
-        ClearBlur();
+        ClearBlurAll();
         _previews.Clear();
         _failed.Clear();
+        _probeCache.Clear();   // 换了一批图，之前探到的朝向全作废
         HoverThumbCache.Instance.Clear();   // 悬停缩略图跟着一起清，不占着旧目录的内存
         HideHoverThumb();
         GpuImageCache.Instance.Clear();   // 换图库：显存里那批一起释放
@@ -999,7 +1052,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         UpdateSelection();
-        ShowPreviewOf(_cur);
+        (int a0, int b0) = PairFor(_cur);
+        _cur = a0;
+        ShowPreviewOf(a0, b0);
         SchedulePreload();
         FillSizes();
 
@@ -1509,6 +1564,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         BuildEntries();
 
         _cur = keep is not null ? Math.Max(0, list.IndexOf(keep)) : 0;
+
+        // 顺序变了，原来那一对可能已经拆开（或配上了新的邻居），重新配一次并显示
+        (int a, int b) = PairFor(_cur);
+        _cur = a;
+        LoadMeta(_cur);
+        ShowPreviewOf(a, b);
         UpdateSelection();
         MarkPos();
         SchedulePreload();
@@ -1660,12 +1721,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        _cur = idx;
+        // 点到的这张可能属于某一对（甚至是右页），按配对结果决定这一屏显示几张
+        (int a, int b) = PairFor(idx);
+        _cur = a;
         ResetView();
-        LoadMeta(idx);
-        ShowPreviewOf(idx);
+        LoadMeta(_cur);
+        ShowPreviewOf(a, b);
         UpdateSelection();
-        Status = $"第 {idx + 1} / {_items.Count} 张";
+        Status = _curB >= 0 ? $"第 {_cur + 1}–{_curB + 1} / {_items.Count} 张" : $"第 {_cur + 1} / {_items.Count} 张";
         SchedulePreload();
         MarkPos();
     }
@@ -1705,21 +1768,126 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         int n = _items.Count;
 
-        Perf.Start($"Go {delta}  → 第 {((_cur + delta) % n + n) % n + 1} 张");
-        _cur = ((_cur + delta) % n + n) % n;
+        int target = NextIndex(delta);
+        Perf.Start($"Go {delta}  → 第 {target + 1} 张");
+
+        // 落点可能本身是「右页」（往回翻时），PairFor 会把它归回自己那一对
+        (int a, int b) = PairFor(target);
+        _cur = a;
         ResetView();
         Perf.Tick("ResetView");
         LoadMeta(_cur);
         Perf.Tick("LoadMeta");
-        ShowPreviewOf(_cur);
+        ShowPreviewOf(a, b);
         Perf.Tick("ShowPreviewOf");
         UpdateSelection();
         Perf.Tick("UpdateSelection（含 ScrollIntoView）");
-        Status = $"第 {_cur + 1} / {n} 张";
+        Status = _curB >= 0 ? $"第 {_cur + 1}–{_curB + 1} / {n} 张" : $"第 {_cur + 1} / {n} 张";
         SchedulePreload();
         Perf.Tick("SchedulePreload");
         MarkPos();
         Perf.Tick("MarkPos");
+    }
+
+    /// <summary>
+    /// 下一格落在哪一张。单页时就是 ±1；正在对开时一次跨过两页——
+    /// 前进跳到右页的下一张，后退跳到左页的前一张（再由 PairFor 归位到那一对）。
+    /// </summary>
+    private int NextIndex(int delta)
+    {
+        int n = _items.Count;
+        if (n == 0)
+        {
+            return 0;
+        }
+
+        int from = _cur < 0 ? 0 : _cur;
+        if (_curB < 0)
+        {
+            return WrapIndex(from + delta, n);
+        }
+
+        return WrapIndex(delta > 0 ? _curB + 1 : from - 1, n);
+    }
+
+    /// <summary>
+    /// 第 idx 张该跟谁一起显示：连续竖图在**段内**两两配对（[0,1] [2,3] …），横图永远单张。
+    /// 返回 (左页, 右页)，右页为 -1 表示单页。
+    ///
+    /// 为什么要按段对齐而不是「当前 + 下一张」的滑动窗口：
+    /// 滑动窗口会让同一张图先出现在右边、下一次翻页又出现在左边，
+    /// 看一页跳一格的漫画式阅读就变成看两遍。
+    /// </summary>
+    private (int A, int B) PairFor(int idx)
+    {
+        if (idx < 0 || idx >= _items.Count || !_opts.SpreadPortrait)
+        {
+            return (idx, -1);
+        }
+
+        PageInfo self = ProbeOf(idx);
+        if (!self.Portrait)
+        {
+            return (idx, -1);
+        }
+
+        // 往前退到这一段连续竖图的起点，用「段内偏移的奇偶」决定它是左页还是右页
+        int s = idx;
+        while (s - 1 >= 0 && PairsWith(s - 1, self))
+        {
+            s--;
+        }
+
+        if ((idx - s) % 2 == 1)
+        {
+            return (idx - 1, idx); // 它是右页
+        }
+
+        // 它是左页：下一张配得上就并排
+        if (idx + 1 < _items.Count && PairsWith(idx + 1, self))
+        {
+            return (idx, idx + 1);
+        }
+
+        return (idx, -1);
+    }
+
+    /// <summary>第 idx 张能不能和 self 配成一对：同为竖图，且 EXIF 变换一致
+    /// （一张要转 90°、另一张不用转的话，两页没法共用同一个基准旋转）。</summary>
+    private bool PairsWith(int idx, PageInfo self)
+    {
+        PageInfo p = ProbeOf(idx);
+        return p.Portrait && p.Rot == self.Rot && p.FlipH == self.FlipH;
+    }
+
+    private PageInfo ProbeOf(int idx)
+    {
+        if (idx < 0 || idx >= _items.Count)
+        {
+            return default;
+        }
+
+        string path = _items[idx].Path;
+        if (_probeCache.TryGetValue(path, out PageInfo cached))
+        {
+            return cached;
+        }
+
+        PageInfo info = default;
+        (int w, int h, int orient) = Decoder.ProbeInfo(path);
+        if (w > 0 && h > 0)
+        {
+            (int rot, bool flipH) = _opts.ExifRotate
+                ? ExifOrientation.ToTransform(orient)
+                : (0, false);
+            bool swap = _opts.ExifRotate && ExifOrientation.SwapsAxes(orient);
+            int dw = swap ? h : w;
+            int dh = swap ? w : h;
+            info = new PageInfo(dh > dw, rot, flipH);
+        }
+
+        _probeCache[path] = info;
+        return info;
     }
 
     private void UpdateSelection()
@@ -1817,13 +1985,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     ///   ③ 未命中 → 先解一张 768 低清占位（避免空白），再解高清覆盖；
     ///   ④ 缓存档位不够清晰时，停手 UpgradeDelayMs 之后再补一张全清的（渐进式升级）。
     /// </summary>
-    private void ShowPreviewOf(int idx)
+    private void ShowPreviewOf(int idx, int idxB = -1)
     {
         _curToken++;
         long token = _curToken;
 
         _viewOwned = null;
+        _viewOwnedB = null;
+        _sizeA = (0, 0);
+        _sizeB = (0, 0);
+        _relB = 1;
+        _curB = idxB is >= 0 && idxB < _items.Count && idxB > idx ? idxB : -1;
         MainImage.Source = null;
+        MainImageB.Source = null;
         _imgW = 0;
         _imgH = 0;
         RefreshImageInfo();
@@ -1832,21 +2006,35 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         if (idx < 0 || idx >= _items.Count)
         {
-            ClearBlur();
+            ClearBlurAll();
             EndFullWait();
             return;
         }
 
+        LoadPage(idx, false, token);
+
+        // 右页同样走一遍取图流程；它晚一点到位也不影响左页先显示出来
+        if (_curB >= 0)
+        {
+            LoadPage(_curB, true, token);
+        }
+    }
+
+    /// <summary>
+    /// 单独一页的取图流程，对开时左右两页各跑一次（互不阻塞，各带自己的 token 校验）。
+    /// </summary>
+    private void LoadPage(int idx, bool isB, long token)
+    {
         string path = _items[idx].Path;
         DecodedImage? hit = _previews.Get(path);
         Perf.Tick("查缓存");
 
         if (hit is not null)
         {
-            ShowDecoded(hit); // 预载命中：立刻出图，这是「翻页不等解码」的关键
+            ShowDecoded(hit, isB); // 预载命中：立刻出图，这是「翻页不等解码」的关键
 
-            // ShowNeed 依赖 _imgW/_imgH（FitFactor 要用），所以必须等上面这行落定再算
-            int need = ShowNeed(hit);
+            // PageNeed 依赖组合尺寸（FitFactor 要用），所以必须等上面这行落定再算
+            int need = PageNeed(isB);
             Perf.Note($"  缓存命中 edge={hit.Edge}（显示需 {need}）");
 
             // 还要不要再解一张全清？只看「屏幕实际要显示多少像素」。
@@ -1855,19 +2043,24 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             // 大图那一次能解到 1.5 秒，切图卡顿就是从这儿来的。
             if (need <= 0 || hit.Edge < need)
             {
-                _ = LoadViewAsync(path, token, UpgradeDelayMs); // 停下来再升到全清
+                _ = LoadViewAsync(path, isB, token, UpgradeDelayMs); // 停下来再升到全清
             }
             else
             {
-                ScheduleRefine();
+                // 精修要等两页都到位：组合尺寸缺一页算出来的目标像素是错的，
+                // 精修结果对不上屏幕，反而会被 WPF 再缩放一次。
+                if (!isB || _viewOwned is not null)
+                {
+                    ScheduleRefine();
+                }
             }
         }
         else
         {
             Perf.Note($"  缓存未命中 → 低清占位 + 全清解码并行（全清需 {ViewEdge()}）");
-            ClearBlur();
-            _ = LoadQuickAsync(path, token);   // 低清占位
-            _ = LoadViewAsync(path, token, 0); // 尽快拿到全清
+            ClearBlur(isB);
+            _ = LoadQuickAsync(path, isB, token);   // 低清占位
+            _ = LoadViewAsync(path, isB, token, 0); // 尽快拿到全清
         }
     }
 
@@ -1888,27 +2081,37 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Interlocked.Exchange(ref _fullTcs, null)?.TrySetResult(true);
     }
 
-    private int ShowNeed(DecodedImage img)
-    {
-        (int w, int h) = TargetPixelSize(img);
-        int need = Math.Max(w, h);
-        return need <= 0 ? 0 : (int)Math.Ceiling(need * 1.05);
-    }
-
     /// <summary>把一张已解码的图放上主视图（预载命中 / 高清到达都走这里）。</summary>
-    private void ShowDecoded(DecodedImage img)
+    private void ShowDecoded(DecodedImage img) => ShowDecoded(img, false);
+
+    /// <summary>
+    /// 同上，<paramref name="isB"/> = true 时放的是**右页**（对开模式）。
+    /// 右页不参与 EXIF 基准旋转——配对时已要求两页方向一致，左页那套就够了。
+    /// </summary>
+    private void ShowDecoded(DecodedImage img, bool isB)
     {
         NoteShown(img.Path);
         Perf.Tick("NoteShown");
-        _viewOwned = img;
 
-        ApplyExifOrientation(img);   // 必须先于几何计算：_imgW/_imgH 要按转正后的尺寸算
-        ApplyViewGeometry(img);      // 钉到设备像素网格，精修成品才能 1:1 上屏
+        if (isB)
+        {
+            _viewOwnedB = img;
+            _sizeB = DisplaySizeOf(img);
+            RecalcCombo();           // 组合尺寸变了（右页的宽高比参与折算）
+        }
+        else
+        {
+            _viewOwned = img;
 
-        MainImage.Source = img.Source;
+            ApplyExifOrientation(img);   // 必须先于几何计算：_sizeA 要按转正后的尺寸算
+        }
+
+        ApplyPageGeometry();     // 钉到设备像素网格，精修成品才能 1:1 上屏
+
+        (isB ? MainImageB : MainImage).Source = img.Source;
         Perf.Tick("MainImage.Source 赋值（位图上传 + 布局失效）");
 
-        if (!_viewTouched)
+        if (!isB && !_viewTouched)
         {
             ApplyFitPolicy();        // 这张还没被手动动过 → 自动策略说了算
         }
@@ -1920,7 +2123,42 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 把主视图元素钉在「适应窗口」的设备像素矩形上（zoom 由 RenderTransform 另行承担）。
+    /// 组合尺寸：把「两张并排」整体当成一张大图来看。
+    ///
+    /// 这样 fit / 缩放 / 平移 / 裁切判定全都能继续用单页那套公式——它们只认
+    /// <c>_imgW / _imgH</c>，对它们来说「两张竖图并排」和「一张很宽的横图」没有区别。
+    /// 单页时就是这一张的尺寸；对开时以**左页的高度**为公共高，右页按等高折算出
+    /// 它在组合里占多宽（<see cref="_relB"/>），中间再加 <see cref="GutterRatio"/> 的留白。
+    /// </summary>
+    private void RecalcCombo()
+    {
+        if (_viewOwned is null)
+        {
+            _imgW = 0;
+            _imgH = 0;
+            return;
+        }
+
+        if (_viewOwnedB is null || _sizeB.H <= 0 || _sizeB.W <= 0)
+        {
+            _relB = 1;
+            _imgW = _sizeA.W;
+            _imgH = _sizeA.H;
+            return;
+        }
+
+        double h = _sizeA.H;
+        _relB = h / (double)_sizeB.H;
+        _imgH = (int)Math.Round(h);
+        _imgW = (int)Math.Round(_sizeA.W + (_sizeB.W * _relB) + (GutterRatio * h));
+    }
+
+    /// <summary>两页并排时中间留白的设备像素数（按组合高的比例算）。</summary>
+    private static int GutterOf(double devH) => (int)Math.Round(GutterRatio * devH);
+
+    /// <summary>
+    /// 把页组合钉在「适应窗口」的设备像素矩形上，并按等高并排算出每页的位置
+    /// （zoom 由 RenderTransform 另行承担）。
     ///
     /// 为什么要钉：画布尺寸常是小数（如 1151.2 DIP），Uniform 布局算出的图片矩形
     /// 会落在 400.2px 这种半个像素上，WPF 只好把精修成品再重采样一遍——
@@ -1928,26 +2166,70 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// 显式宽高 + Stretch=Fill + UseLayoutRounding 之后，矩形原点与尺寸都落在
     /// 整数设备像素上：适应窗口（zoom=1）时位图与屏幕严格 1:1，WPF 一个像素都不用猜。
     /// </summary>
-    private void ApplyViewGeometry(DecodedImage img)
+    private void ApplyPageGeometry()
     {
-        (int fw, int fh) = FitDeviceSize(img);
-        if (fw <= 0)
+        double f = FitFactor();
+        if (f <= 0 || _imgW <= 0 || _imgH <= 0)
         {
             return;
         }
 
         double dpi = DpiFactor;
-        if (_zoomBaked)
+
+        // 清晰层：烤入态 zoom 已经在布局尺寸里，这里不再乘；
+        // 低清层从不烤入，永远用「适应」尺寸，靠 _lowScale 跟 _zoom。
+        LayoutPages(_imgH * f * dpi * (_zoomBaked ? _zoom : 1), true);
+        LayoutPages(_imgH * f * dpi, false);
+    }
+
+    /// <summary>
+    /// 按给定的组合高（设备像素）把两页摆好：两张等高、按各自宽高比取宽，
+    /// 整体作为 Canvas 的内容从 (0,0) 排开（Canvas 自己在 Frame 里居中）。
+    /// </summary>
+    private void LayoutPages(double comboDevH, bool main)
+    {
+        int devH = Math.Max(1, (int)Math.Round(comboDevH));
+        int aW = PageDevWidth(_sizeA, devH);
+        int gutter = GutterOf(devH);
+
+        bool spread = _viewOwnedB is not null && _sizeB.W > 0 && _sizeB.H > 0;
+        int bW = spread ? PageDevWidth(_sizeB, devH) : 0;
+        int comboW = spread ? aW + gutter + bW : aW;
+
+        double dpi = DpiFactor;
+        double hDip = devH / dpi;
+
+        Canvas layer = main ? PagesMain : PagesLow;
+        System.Windows.Controls.Image imgA = main ? MainImage : LowImage;
+        System.Windows.Controls.Image imgB = main ? MainImageB : LowImageB;
+
+        layer.Width = comboW / dpi;
+        layer.Height = hDip;
+
+        // 水平镜像时两页要整体对调（镜像的是整幅画面，不是各自照镜子）
+        bool swap = TotalFlipH && spread;
+        double xA = 0;
+        double xB = aW + gutter;
+        if (swap)
         {
-            // 烤进布局的 zoom 同样要取整：显示矩形 = 布局取整 × 变换(1)，
-            // 与精修目标 TargetPixelSize 的取整方式保持一致才能严格 1:1
-            fw = Math.Max(1, (int)Math.Round(fw * _zoom));
-            fh = Math.Max(1, (int)Math.Round(fh * _zoom));
+            (xA, xB) = (bW + gutter, 0);
         }
 
-        MainImage.Stretch = Stretch.Fill;
-        MainImage.Width = fw / dpi;
-        MainImage.Height = fh / dpi;
+        Place(imgA, xA / dpi, aW / dpi, hDip);
+        Place(imgB, xB / dpi, bW / dpi, hDip, spread);
+    }
+
+    private static int PageDevWidth((int W, int H) size, int devH) =>
+        size.H <= 0 ? 0 : Math.Max(1, (int)Math.Round(size.W * (devH / (double)size.H)));
+
+    private static void Place(System.Windows.Controls.Image img, double left, double width, double height, bool visible = true)
+    {
+        img.Stretch = Stretch.Fill;
+        img.Width = width;
+        img.Height = height;
+        Canvas.SetLeft(img, left);
+        Canvas.SetTop(img, 0);
+        img.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>true = zoom 已烤进布局宽高（缩放停稳后的精修态），RenderTransform 只剩镜像。</summary>
@@ -1967,7 +2249,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _zoomBaked = false;
         if (_viewOwned is not null)
         {
-            ApplyViewGeometry(_viewOwned);
+            ApplyPageGeometry();
         }
     }
 
@@ -1991,7 +2273,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         _zoomBaked = true;
-        ApplyViewGeometry(_viewOwned);
+        ApplyPageGeometry();
         UpdateTransform();
     }
 
@@ -2006,25 +2288,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             _baseRot = 0;
             _baseFlipH = false;
-            _imgW = img.Width;
-            _imgH = img.Height;
+            _sizeA = (img.Width, img.Height);
+            RecalcCombo();
             return;
         }
 
         (int rot, bool flipH) = ExifOrientation.ToTransform(img.ExifOrientation);
         _baseRot = rot;
         _baseFlipH = flipH;
-
-        if (ExifOrientation.SwapsAxes(img.ExifOrientation))
-        {
-            _imgW = img.Height;
-            _imgH = img.Width;
-        }
-        else
-        {
-            _imgW = img.Width;
-            _imgH = img.Height;
-        }
+        _sizeA = DisplaySizeOf(img);
+        RecalcCombo();
     }
 
     /// <summary>
@@ -2047,15 +2320,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        double physical = f * DpiFactor;
+        // physical = 「一个图片像素占几个物理屏幕像素」。对开时两页的倍率并不相同
+        // （右页为了跟左页等高，被额外缩放了 _relB 倍），要两张都不被放大才算数，
+        // 所以取两者的最大值来收——否则右页会被悄悄拉过 100%。
+        double physical = f * DpiFactor * (_viewOwnedB is not null ? Math.Max(1.0, _relB) : 1.0);
         if (physical > 1.0)
         {
             _zoom = 1.0 / physical;
         }
     }
 
-    /// <summary>低清占位：仅在预载未命中时用，与主视图解码并行。</summary>
-    private async Task LoadQuickAsync(string path, long token)
+    /// <summary>低清占位：仅在预载未命中时用，与主视图解码并行。isB = 右页那一层。</summary>
+    private async Task LoadQuickAsync(string path, bool isB, long token)
     {
         if (token != _curToken)
         {
@@ -2078,12 +2354,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 return; // 解码期间又切了图 → 丢弃
             }
 
-            if (MainImage.Source is null)
+            if ((isB ? MainImageB : MainImage).Source is null)
             {
-                StartFocus(q);
+                StartFocus(q, isB);
             }
 
-            _previews.Add(q, MainImage.Source, LowImage.Source);
+            _previews.Add(q, CurrentSources());
         }
         finally
         {
@@ -2092,27 +2368,35 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     /// <summary>
+    /// 此刻正挂在主视图 / 过渡层上的位图：缓存淘汰时要保住它们，
+    /// 否则正在看的这一屏会被 LRU 换出去，画面直接变黑。
+    /// </summary>
+    private ImageSource?[] CurrentSources() =>
+        new ImageSource?[] { MainImage.Source, LowImage.Source, MainImageB.Source, LowImageB.Source };
+
+    /// <summary>
     /// 解出「画布长边 ×2」的全清图并覆盖主视图。
     /// delayMs &gt; 0 时先等一会儿：连续翻页途中就不浪费 CPU 去解高清了，
     /// 停手之后才把当前这张升到全清。
     /// </summary>
-    private async Task LoadViewAsync(string path, long token, int delayMs = 0)
+    private async Task LoadViewAsync(string path, bool isB, long token, int delayMs = 0)
     {
         try
         {
-            await LoadViewCoreAsync(path, token, delayMs);
+            await LoadViewCoreAsync(path, isB, token, delayMs);
         }
         finally
         {
-            // 无论解出来、解码失败还是中途作废，等待者都要放开，不能再卡着翻页
-            if (token == _curToken)
+            // 无论解出来、解码失败还是中途作废，等待者都要放开，不能再卡着翻页。
+            // 「翻页不等载入」只等左页——右页晚一点到位不该卡住下一次翻页。
+            if (token == _curToken && !isB)
             {
                 EndFullWait();
             }
         }
     }
 
-    private async Task LoadViewCoreAsync(string path, long token, int delayMs)
+    private async Task LoadViewCoreAsync(string path, bool isB, long token, int delayMs)
     {
         if (delayMs > 0)
         {
@@ -2125,8 +2409,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         // 常规按画布取档；但如果在放大状态下翻到这里（zoom > 适应），
         // 再按 ViewEdge 解一张照样不够——必须按放大后的真实需求取档，否则还是糊的。
+        // 对开时每页只占半个画面，各自按自己的显示矩形取档即可（按整幅取会白白解大一倍）。
         int edge = ViewEdge();
-        int need = NeededEdge();
+        int need = _curB >= 0 ? PageNeed(isB) : NeededEdge();
         if (need > edge)
         {
             edge = Math.Min(need, ZoomEdgeMax);
@@ -2164,11 +2449,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        ShowDecoded(ret);
-        ClearBlur();
+        ShowDecoded(ret, isB);
+        ClearBlur(isB);
 
-        // 清晰图就位后，再让 GPU 按屏幕实际像素精修一次（缩放停止后也会重做）
-        _ = RefineViewAsync(ret, token);
+        // 清晰图就位后，再让 GPU 按屏幕实际像素精修一次（缩放停止后也会重做）。
+        // 对开时右页要等两页都到位才精修：只有一页时组合尺寸是残缺的，
+        // 算出来的目标像素对不上屏幕，成品反而会被 WPF 再缩放一次。
+        _ = RefineViewAsync(ret, isB, token);
     }
 
     // ==================================================================
@@ -2188,10 +2475,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// 精修只管「降采样」。放大时目标比源还大，这里不动（目标是要 new 像素，
     /// 交给 WPF 插值）；真正需要更高清晰度时由 <see cref="UpgradeViewAsync"/>
     /// 回解码器按屏幕所需重新取一张，那才是「放大后再次 sample」。
+    ///
+    /// 对开时右页走的是同一条路，但有两个坑：
+    ///   ① 作废代号要左右分开——共用一个的话，两页同时精修时先发起的那页会被后一页顶掉；
+    ///   ② 零拷贝 / 复用位图那两条路是**单例**资源（一张 D3D 纹理、一张复用位图），
+    ///      两页同时用会互相覆盖成同一张画面，所以右页只走「新建位图」那条路。
     /// </summary>
-    private async Task RefineViewAsync(DecodedImage src, long token)
+    private async Task RefineViewAsync(DecodedImage src, bool isB, long token)
     {
-        long seq = ++_refineSeq;
+        long seq = isB ? ++_refineSeqB : ++_refineSeq;
+        bool Fresh() => (isB ? _refineSeqB : _refineSeq) == seq && token == _curToken;
 
         // GPU 不可用时，只要有 CPU 的高质量重采样（AVX2 Mitchell）就照样精修：
         // 否则非 NVIDIA 机器只能靠 WPF 自己缩放（双线性，高频细节会糊）。
@@ -2203,13 +2496,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         await Task.Delay(RefineDelayMs);
-        if (seq != _refineSeq || token != _curToken)
+        if (!Fresh())
         {
             return;
         }
 
-        (int w, int h) = TargetPixelSize(src);
-        GpuDiagnose($"refine 目标 {w}x{h}  位图 {src.Source.PixelWidth}x{src.Source.PixelHeight}  原图 {src.Width}x{src.Height}" +
+        (int w, int h) = PageTargetPixels(isB);
+        GpuDiagnose($"refine{(isB ? "[右页]" : "")} 目标 {w}x{h}  位图 {src.Source.PixelWidth}x{src.Source.PixelHeight}  原图 {src.Width}x{src.Height}" +
                     $"  _img {_imgW}x{_imgH}  Frame {FrameW:F0}x{FrameH:F0}  zoom {_zoom:F2} baked {_zoomBaked} rot {TotalRot}");
 
         if (w <= 0 || h <= 0)
@@ -2217,7 +2510,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        ApplyViewGeometry(src); // zoom 变了 → 矩形重新钉到设备像素，成品位图保持 1:1
+        ApplyPageGeometry(); // zoom 变了 → 矩形重新钉到设备像素，成品位图保持 1:1
 
         if (w >= src.Source.PixelWidth || h >= src.Source.PixelHeight)
         {
@@ -2241,12 +2534,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 return;
             }
 
-            if (cpuMade is null || seq != _refineSeq || token != _curToken)
+            if (cpuMade is null || !Fresh())
             {
                 return;
             }
 
-            MainImage.Source = cpuMade;
+            (isB ? MainImageB : MainImage).Source = cpuMade;
             Perf.Tick("CPU 精修上屏");
             return;
         }
@@ -2257,12 +2550,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             BitmapSource? hit = GpuResampler.TryResult(src.Path, src.Source, w, h);
             if (hit is not null)
             {
-                if (seq != _refineSeq || token != _curToken)
+                if (!Fresh())
                 {
                     return;
                 }
 
-                MainImage.Source = hit;
+                (isB ? MainImageB : MainImage).Source = hit;
                 Perf.Tick("精修上屏[结果缓存]");
                 return;
             }
@@ -2270,7 +2563,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             // ③ 零拷贝：kernel 结果直接写进 D3D9 纹理，WPF 拿这张纹理上屏。
             //    相较于 ④，省掉的是「回读几 MB 到主机内存」这一趟；
             //    相较于 ②（结果缓存），省的是主机内存里那份成品位图。
-            if (D3dView.Enabled)
+            //    右页不能用：D3D 纹理是单例，两页会画到同一张纹理上。
+            if (D3dView.Enabled && !isB)
             {
                 ImageSource? d3d = D3dView.Instance.Prepare(w, h);
                 if (d3d is not null)
@@ -2291,11 +2585,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                         GpuDiagnose($"d3d refine 异常 {ex.GetType().Name}: {ex.Message}");
                     }
 
-                    if (wrote && seq == _refineSeq && token == _curToken)
+                    if (wrote && Fresh())
                     {
                         // 先给 Source（让 D3DImage 挂进视觉树），再标脏区，
                         // 否则脏区打在没有宿主的对象上不触发任何拷贝。
-                        MainImage.Source = d3d;
+                        (isB ? MainImageB : MainImage).Source = d3d;
 
                         Stopwatch sw4 = Stopwatch.StartNew();
                         bool shown = D3dView.Instance.Present(w, h);
@@ -2314,7 +2608,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
             // ④ 后台算完留在显存，UI 线程再直接写进复用位图：
             //    没有中间数组、没有新位图，尺寸不变时 WPF 也不必重建纹理。
-            bool computed;
+            //    右页同样要避开：复用位图只有一张，两页共用会一起变成后写的那一页。
+            if (!isB)
+            {
+                bool computed;
             try
             {
                 Stopwatch sw2 = Stopwatch.StartNew();
@@ -2328,20 +2625,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 return;
             }
 
-            if (computed && seq == _refineSeq && token == _curToken)
-            {
-                Stopwatch swc = Stopwatch.StartNew();
-                BitmapSource? view = ViewSurface.Instance.Commit(w, h);
-                Perf.Span("  写复用位图（回读 + 标脏）", swc.ElapsedMilliseconds);
-
-                if (view is not null)
+                if (computed && Fresh())
                 {
-                    MainImage.Source = view;
-                    Perf.Tick("精修上屏[复用位图]");
-                    return;
-                }
+                    Stopwatch swc = Stopwatch.StartNew();
+                    BitmapSource? view = ViewSurface.Instance.Commit(w, h);
+                    Perf.Span("  写复用位图（回读 + 标脏）", swc.ElapsedMilliseconds);
 
-                GpuDiagnose("复用位图提交失败，回退新建位图");
+                    if (view is not null)
+                    {
+                        MainImage.Source = view;
+                        Perf.Tick("精修上屏[复用位图]");
+                        return;
+                    }
+
+                    GpuDiagnose("复用位图提交失败，回退新建位图");
+                }
             }
         }
 
@@ -2366,53 +2664,57 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        if (seq != _refineSeq || token != _curToken)
+        if (!Fresh())
         {
             return;
         }
 
         Stopwatch swo = Stopwatch.StartNew();
-        MainImage.Source = refined;
+        (isB ? MainImageB : MainImage).Source = refined;
         Perf.Span("  新位图上屏（新建 + 标脏）", swo.ElapsedMilliseconds);
         Perf.Tick("精修结果上屏");
     }
 
-    /// <summary>当前 zoom / 旋转 / DPI 下，这张图实际占多少屏幕像素。</summary>
-    private (int W, int H) TargetPixelSize(DecodedImage img)
-    {
-        (int fw, int fh) = FitDeviceSize(img);
-        if (fw <= 0)
-        {
-            return (0, 0);
-        }
-
-        // 必须「先取整适应矩形、再乘 zoom」：显示矩形就是这两步的复合
-        // （布局取整 × RenderTransform），反着算会差出 1px，成品位图又得被重采样。
-        return (Math.Max(1, (int)Math.Round(fw * _zoom)), Math.Max(1, (int)Math.Round(fh * _zoom)));
-    }
-
     /// <summary>
-    /// 「适应窗口」时这张图占的设备像素矩形（不含 zoom，取整后与
-    /// <see cref="ApplyViewGeometry"/> 钉死的布局矩形严格一致）。
+    /// 当前 zoom / DPI 下，**某一页**实际占多少屏幕像素。
+    /// 对开时两页尺寸不同、但高度一致，所以不能只看一张（右页可能被缩放 _relB 倍），
+    /// 必须各算各的——否则右页会拿左页的目标尺寸去精修，成品对不上屏幕像素。
     /// </summary>
-    private (int W, int H) FitDeviceSize(DecodedImage img)
+    private (int W, int H) PageTargetPixels(bool isB)
     {
         double f = FitFactor();
-        if (f <= 0 || img.Width <= 0 || img.Height <= 0)
+        if (f <= 0 || _imgW <= 0 || _imgH <= 0)
         {
             return (0, 0);
         }
 
-        (int ew, int eh) = DisplaySize(img);
-        double dpi = DpiFactor;
-        return (Math.Max(1, (int)Math.Round(ew * f * dpi)), Math.Max(1, (int)Math.Round(eh * f * dpi)));
+        (int W, int H) s = isB ? _sizeB : _sizeA;
+        if (s.H <= 0 || s.W <= 0)
+        {
+            return (0, 0);
+        }
+
+        // 与布局同一套取整：先把「适应」的组合高钉到设备像素，再按各自宽高比取宽，
+        // 最后才乘 zoom（显示矩形 = 布局取整 × RenderTransform）。
+        // 顺序反了会差出 1px，成品位图又要被 WPF 重采样一次。
+        int fitH = Math.Max(1, (int)Math.Round(_imgH * f * DpiFactor));
+        int fitW = PageDevWidth(s, fitH);
+        return (Math.Max(1, (int)Math.Round(fitW * _zoom)), Math.Max(1, (int)Math.Round(fitH * _zoom)));
+    }
+
+    /// <summary>某一页此刻需要的解码档位（长边像素，留 5% 余量）。</summary>
+    private int PageNeed(bool isB)
+    {
+        (int w, int h) = PageTargetPixels(isB);
+        int need = Math.Max(w, h);
+        return need <= 0 ? 0 : (int)Math.Ceiling(need * 1.05);
     }
 
     /// <summary>
     /// 画面上看到的宽高 —— EXIF 把横竖换过来的话这里也要跟着换，
     /// 否则竖拍照片会被按原始（横）尺寸去算重采样目标。
     /// </summary>
-    private (int W, int H) DisplaySize(DecodedImage img)
+    private (int W, int H) DisplaySizeOf(DecodedImage img)
     {
         bool swap = _opts.ExifRotate && ExifOrientation.SwapsAxes(img.ExifOrientation);
         return swap ? (img.Height, img.Width) : (img.Width, img.Height);
@@ -2449,22 +2751,33 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         BakeZoom(); // 缩放停稳：把 zoom 烤进布局并取整到设备像素，成品位图才能 1:1 上屏
 
-        (int w, int h) = TargetPixelSize(_viewOwned);
+        // 对开时右页有自己一份位图，要不要重新解码 / 精修得各判各的
+        // （右页被等高缩放过，需求像素跟左页不是一回事）。
+        RefinePage(_viewOwned, false);
+        if (_viewOwnedB is not null)
+        {
+            RefinePage(_viewOwnedB, true);
+        }
+    }
+
+    private void RefinePage(DecodedImage img, bool isB)
+    {
+        (int w, int h) = PageTargetPixels(isB);
         int need = Math.Max(w, h);
-        int have = Math.Max(_viewOwned.Source.PixelWidth, _viewOwned.Source.PixelHeight);
+        int have = Math.Max(img.Source.PixelWidth, img.Source.PixelHeight);
 
         // 屏幕要的比手上这张多（放大了），且实际还能从原图取到更多像素
         // → 回去按新需求重新解码，这才是「再次 sample」。
         // have 已经等于原图像素时就到此为止：再解也解不出更多东西，
         // 剩下的（>100% 的放大）只能交给 WPF 插值。
-        int native = Math.Max(_viewOwned.Width, _viewOwned.Height);
+        int native = Math.Max(img.Width, img.Height);
         if (need > have && have < native)
         {
-            _ = UpgradeViewAsync(_viewOwned, need, _curToken);
+            _ = UpgradeViewAsync(img, isB, need, _curToken);
             return;
         }
 
-        _ = RefineViewAsync(_viewOwned, _curToken);
+        _ = RefineViewAsync(img, isB, _curToken);
     }
 
     /// <summary>
@@ -2475,9 +2788,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// 补出来的全是猜测像素。回解码器按 2700px 重新采样，拿到的是原始信息。
     /// 解码由 WIC 完成（它本身就是高质量重采样），回来后再交给 GPU 精修对齐到目标像素。
     /// </summary>
-    private async Task UpgradeViewAsync(DecodedImage cur, int need, long token)
+    private async Task UpgradeViewAsync(DecodedImage cur, bool isB, int need, long token)
     {
-        long seq = ++_upgradeSeq;
+        long seq = isB ? ++_upgradeSeqB : ++_upgradeSeq;
+        bool Fresh() => (isB ? _upgradeSeqB : _upgradeSeq) == seq && token == _curToken;
 
         int edge = DecodeEdgeFor(need, cur.Width, cur.Height);
         if (edge <= Math.Max(cur.Source.PixelWidth, cur.Source.PixelHeight))
@@ -2487,7 +2801,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         // 与精修一样等一小会儿：连点放大时只算最后一次，中间的作废
         await Task.Delay(RefineDelayMs);
-        if (seq != _upgradeSeq || token != _curToken)
+        if (!Fresh())
         {
             return;
         }
@@ -2496,7 +2810,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         DecodedImage? bigger;
         try
         {
-            if (seq != _upgradeSeq || token != _curToken)
+            if (!Fresh())
             {
                 return;
             }
@@ -2510,18 +2824,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             DecodeGate.Release();
         }
 
-        if (bigger is null || seq != _upgradeSeq || token != _curToken)
+        if (bigger is null || !Fresh())
         {
             return;
         }
 
-        // 换上去的那张按原图比例、取 Higher 档；_imgW/_imgH 不变，所以 FitFactor 与
+        // 换上去的那张按原图比例、取 Higher 档；组合尺寸不变，所以 FitFactor 与
         // 当前的 zoom / 平移完全不受影响，画面位置不会跳。
-        ShowDecoded(bigger);
-        ClearBlur();
+        ShowDecoded(bigger, isB);
+        ClearBlur(isB);
 
         // 到位后再让 GPU 精修一次，把它对齐到屏幕像素（通常这一步已是 1:1 级降采样）
-        _ = RefineViewAsync(bigger, token);
+        _ = RefineViewAsync(bigger, isB, token);
     }
 
     private void NoteShown(string path)
@@ -2540,33 +2854,55 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     // 切图时把已缓存的低清图立刻顶上（避免空白），清晰图解码完成后直接替换。
     // 不做模糊、不做缩放呼吸、不做淡入淡出——纯瞬时切换。
 
-    private void StartFocus(DecodedImage img)
+    private void StartFocus(DecodedImage img) => StartFocus(img, false);
+
+    private void StartFocus(DecodedImage img, bool isB)
     {
         NoteShown(img.Path);
 
-        LowImage.Source = img.Source;
-        LowImage.Opacity = 1;
-        LowImage.Effect = null;
-        if (_imgW <= 0)
+        System.Windows.Controls.Image low = isB ? LowImageB : LowImage;
+        low.Source = img.Source;
+        low.Opacity = 1;
+        low.Effect = null;
+
+        if (isB)
+        {
+            if (_sizeB.H <= 0)
+            {
+                // 右页先按低清的尺寸顶上（清晰图到了再校正），组合宽度才有得算
+                _sizeB = DisplaySizeOf(img);
+                RecalcCombo();
+                ApplyPageGeometry();
+                RefreshImageInfo();
+            }
+        }
+        else if (_imgW <= 0)
         {
             // 先让用户看到尺寸，清晰图到了再校正（低清图同样要按 EXIF 方向转正）
-            (int ew, int eh) = DisplaySize(img);
-            _imgW = ew;
-            _imgH = eh;
+            _sizeA = DisplaySizeOf(img);
+            RecalcCombo();
+            ApplyPageGeometry();
             RefreshImageInfo();
         }
 
         UpdateTransform();
     }
 
-    /// <summary>清晰图已就位（或解码失败）：撤掉低清占位层。</summary>
-    private void FinishFocus() => ClearBlur();
+    /// <summary>清晰图已就位（或解码失败）：撤掉低清占位层（两页一起撤）。</summary>
+    private void FinishFocus() => ClearBlurAll();
 
-    private void ClearBlur()
+    private void ClearBlurAll()
     {
-        LowImage.Source = null;
-        LowImage.Opacity = 0;
-        LowImage.Effect = null;
+        ClearBlur(false);
+        ClearBlur(true);
+    }
+
+    private void ClearBlur(bool isB)
+    {
+        System.Windows.Controls.Image low = isB ? LowImageB : LowImage;
+        low.Source = null;
+        low.Opacity = 0;
+        low.Effect = null;
     }
 
     // ==================================================================
@@ -3468,13 +3804,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         // 否则换了窗口尺寸图片还停在旧大小（Uniform 自动适应已经不生效了）。
         if (_viewOwned is not null)
         {
-            ApplyViewGeometry(_viewOwned);
+            ApplyPageGeometry();
         }
 
         if (_pendingReload && _cur >= 0)
         {
             _pendingReload = false;
-            ShowPreviewOf(_cur);
+            (int ra, int rb) = PairFor(_cur);
+            ShowPreviewOf(ra, rb);
         }
 
         // 只有预载档位真的变了才重排（档位没变时不必动预载链，否则会和布局互相刺激）
@@ -3855,7 +4192,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         // 显式宽高按 DIP 存，DPI 一变同样的 DIP 对应的设备像素就不同了，必须重钉
         if (_viewOwned is not null)
         {
-            ApplyViewGeometry(_viewOwned);
+            ApplyPageGeometry();
         }
         ScheduleRefine();
     }
@@ -4062,14 +4399,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         // 这些开关改变了「已经解出来的位图」，缓存里的旧结果必须作废，
         // 否则看到的还是改之前的那版，会误以为选项没生效。
-        _previews.Clear(MainImage.Source, LowImage.Source);
+        _previews.Clear(CurrentSources());
         GpuImageCache.Instance.Clear();
+
+        // EXIF 开关变了，之前按旧策略探出来的朝向就作废了，得重新探
+        _probeCache.Clear();
 
         if (_cur >= 0 && _cur < _items.Count)
         {
             _viewTouched = false; // 让「适应 / 小图不放大」重新算一遍
             ResetView();
-            ShowPreviewOf(_cur);
+            (int a, int b) = PairFor(_cur);
+            ShowPreviewOf(a, b);
         }
     }
 
@@ -4079,10 +4420,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// </summary>
     private void ApplyScalingMode()
     {
-        RenderOptions.SetBitmapScalingMode(MainImage,
-            _opts.HighQualityDownscale ? BitmapScalingMode.HighQuality : BitmapScalingMode.LowQuality);
-        RenderOptions.SetBitmapScalingMode(LowImage,
-            _opts.HighQualityDownscale ? BitmapScalingMode.HighQuality : BitmapScalingMode.LowQuality);
+        BitmapScalingMode mode = _opts.HighQualityDownscale
+            ? BitmapScalingMode.HighQuality
+            : BitmapScalingMode.LowQuality;
+        RenderOptions.SetBitmapScalingMode(MainImage, mode);
+        RenderOptions.SetBitmapScalingMode(LowImage, mode);
+        RenderOptions.SetBitmapScalingMode(MainImageB, mode);
+        RenderOptions.SetBitmapScalingMode(LowImageB, mode);
     }
 
     /// <summary>
@@ -4147,7 +4491,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
                 // 显示链路有两套：普通 BitmapSource（含精修后的 WriteableBitmap）
                 // 与零拷贝的 D3DImage，两者尺寸属性不通用，分开取。
-                (int tw, int th) = TargetPixelSize(_viewOwned);
+                (int tw, int th) = PageTargetPixels(false);
                 int bw = 0;
                 int bh = 0;
                 switch (MainImage.Source)

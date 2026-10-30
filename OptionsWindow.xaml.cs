@@ -37,7 +37,12 @@ public partial class OptionsWindow : Window
 
         (nameof(AppOptions.InstantNavigation),
          "在图片列表中往前或往后不等待图片完全载入",
-         "勾上时先用已缓存的清晰度立刻出图，高清版本随后到；取消则每一步都等当前这张完全载入后才推进。")
+         "勾上时先用已缓存的清晰度立刻出图，高清版本随后到；取消则每一步都等当前这张完全载入后才推进。"),
+
+        (nameof(AppOptions.SpreadPortrait),
+         "竖图对开：连续两张竖图左右并排显示",
+         "当前这张是竖图、紧挨着的下一张也是竖图时，两张并排一起显示（漫画 / 扫描件的看法），" +
+         "翻页一次跨过两页。取消则任何时候都只显示一张。")
     };
 
     public OptionsWindow(AppOptions opts)

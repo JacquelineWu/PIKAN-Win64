@@ -258,23 +258,38 @@
                 <!-- 视图层：外旋转 + 平移，内层缩放 + 镜像 -->
                 <Grid x:Name="Viewport">
                     <Grid x:Name="Frame" HorizontalAlignment="Center" VerticalAlignment="Center">
-                        <!-- 两个 Image 必须显式居中：MainImage 在烤入态带显式宽高（放大后比 Frame 大），
-                             WPF 对「显式尺寸 + 默认 Stretch」的处理是钉在槽左上角而不是居中，
-                             不写这两行的话缩放停稳的瞬间图会跳成左上贴边、右下溢出（crop 现象） -->
-                        <Image x:Name="MainImage"
-                               Stretch="Uniform"
-                               HorizontalAlignment="Center"
-                               VerticalAlignment="Center"
-                               RenderTransformOrigin="0.5,0.5"
-                               RenderOptions.BitmapScalingMode="HighQuality"
-                               IsHitTestVisible="False" />
-                        <Image x:Name="LowImage"
-                               Stretch="Uniform"
-                               HorizontalAlignment="Center"
-                               VerticalAlignment="Center"
-                               RenderTransformOrigin="0.5,0.5"
-                               IsHitTestVisible="False"
-                               Opacity="0" />
+                        <!-- 对开（两页并排）时两张图必须作为一个整体缩放：缩放挂在这层 Canvas 上，
+                             原点取 0.5,0.5 = 组合矩形的中心。若各自挂在 Image 上，两页会各自围绕
+                             自己的中心长大，越放越大就越往中间挤、最后叠在一起。
+                             单页时 Canvas 尺寸就等于那一页的矩形，行为与改动前完全等价。
+                             两个层（清晰 / 低清占位）尺寸与位置相同，只是变换不同：
+                             清晰层在缩放停稳后把 zoom 烤进布局尺寸，低清层永远靠变换跟 _zoom。 -->
+                        <Canvas x:Name="PagesMain"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center"
+                                RenderTransformOrigin="0.5,0.5">
+                            <Image x:Name="MainImage"
+                                   Stretch="Uniform"
+                                   RenderOptions.BitmapScalingMode="HighQuality"
+                                   IsHitTestVisible="False" />
+                            <Image x:Name="MainImageB"
+                                   Stretch="Uniform"
+                                   RenderOptions.BitmapScalingMode="HighQuality"
+                                   IsHitTestVisible="False" />
+                        </Canvas>
+                        <Canvas x:Name="PagesLow"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center"
+                                RenderTransformOrigin="0.5,0.5">
+                            <Image x:Name="LowImage"
+                                   Stretch="Uniform"
+                                   IsHitTestVisible="False"
+                                   Opacity="0" />
+                            <Image x:Name="LowImageB"
+                                   Stretch="Uniform"
+                                   IsHitTestVisible="False"
+                                   Opacity="0" />
+                        </Canvas>
                     </Grid>
                 </Grid>
 
