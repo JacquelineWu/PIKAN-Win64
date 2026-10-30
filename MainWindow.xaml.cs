@@ -1141,8 +1141,65 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// Matrix 的方法都是「右乘追加」，故先 Translate 再 RotateAt 得到 M = T·R，
     /// 即点先被旋转、再被平移。
     /// </summary>
+    /// <summary>
+    /// 把平移量夹住，别让图片跑出视口。
+    ///
+    /// 图片中心 = 视口中心 + 平移量。要「图片铺满视口」就得满足
+    /// 左边缘 ≤ 0 且 右边缘 ≥ 视口宽，两条合起来就是 |t| ≤ (图 − 视口) / 2；
+    /// 图片比视口小时同一个式子自动变成「不许把图推出视口」（两侧可以留灰底）。
+    /// 取绝对值就能同时覆盖这两种情形：|t| ≤ |图 − 视口| / 2。
+    ///
+    /// 没有这道约束时，在图片外的灰底上点击放大（锚点在图外）会把图整个推走，
+    /// 视口边缘露出一条灰底，看着就像图被裁掉了一块。
+    /// </summary>
+    private void ClampPan()
+    {
+        double f = FitFactor();
+        if (f <= 0 || _imgW <= 0 || _imgH <= 0)
+        {
+            return;
+        }
+
+        double cw = CanvasArea.ActualWidth;
+        double ch = CanvasArea.ActualHeight;
+        if (cw <= 0 || ch <= 0)
+        {
+            return;
+        }
+
+        double iw = _imgW * f * _zoom;
+        double ih = _imgH * f * _zoom;
+
+        // 旋转是「先平移、再绕视口中心转」，所以把平移量转到旋转后的坐标系里夹，
+        // 夹完再转回来；90° / 270° 时图片的包围盒宽高互换。
+        int q = ((TotalRot % 360) + 360) % 360 / 90;
+        (double u, double v) = q switch
+        {
+            1 => (-_ty, _tx),
+            2 => (-_tx, -_ty),
+            3 => (_ty, -_tx),
+            _ => (_tx, _ty),
+        };
+
+        double bw = q % 2 == 0 ? iw : ih;
+        double bh = q % 2 == 0 ? ih : iw;
+
+        u = Clamp(u, -Math.Abs(bw - cw) / 2, Math.Abs(bw - cw) / 2);
+        v = Clamp(v, -Math.Abs(bh - ch) / 2, Math.Abs(bh - ch) / 2);
+
+        (_tx, _ty) = q switch
+        {
+            1 => (v, -u),
+            2 => (-u, -v),
+            3 => (-v, u),
+            _ => (u, v),
+        };
+    }
+
     private void UpdateTransform()
     {
+        ClampPan();
+
         double cw = CanvasArea.ActualWidth;
         double ch = CanvasArea.ActualHeight;
 
