@@ -248,7 +248,8 @@
                   MouseWheel="CanvasArea_MouseWheel"
                   MouseDown="CanvasArea_MouseDown"
                   MouseMove="CanvasArea_MouseMove"
-                  MouseUp="CanvasArea_MouseUp">
+                  MouseUp="CanvasArea_MouseUp"
+                  LostMouseCapture="CanvasArea_LostCapture">
 
                 <!-- 视图层：外旋转 + 平移，内层缩放 + 镜像 -->
                 <Grid x:Name="Viewport">
@@ -265,6 +266,15 @@
                                Opacity="0" />
                     </Grid>
                 </Grid>
+
+                <!-- 拖拽平移时：画面临时缩回整图，红框标出松手后会看到的区域 -->
+                <Canvas x:Name="PanoLayer" IsHitTestVisible="False" Visibility="Collapsed">
+                    <Rectangle x:Name="PanoBox"
+                               Stroke="#ff6b81"
+                               StrokeThickness="2"
+                               Fill="#22ff6b81"
+                               SnapsToDevicePixels="True" />
+                </Canvas>
 
                 <!-- 空态提示 -->
                 <StackPanel VerticalAlignment="Center"
