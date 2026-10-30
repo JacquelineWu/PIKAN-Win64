@@ -1200,6 +1200,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         ClampPan();
 
+        // 烤入态只在「不平移」时成立：烤入后元素布局尺寸 = 显示尺寸，
+        // 放大后这个矩形远大于画布；此时再平移，WPF 的绘制区域会按「未平移的
+        // 元素矩形 ∩ 画布」算，画面沿平移方向缺掉 |t| 一条（放大到 3.5×、平移
+        // 800 时画布 99% 是灰底）。所以一旦要平移就解冻，把缩放交回变换，
+        // 元素退回适应尺寸、不再溢出画布。
+        // 视觉尺寸不变（fit × zoom 两种算法等价），画质也不受影响（实测锐度一致）。
+        if (_zoomBaked && (_tx != 0 || _ty != 0))
+        {
+            UnbakeZoom();
+        }
+
         double cw = CanvasArea.ActualWidth;
         double ch = CanvasArea.ActualHeight;
 
@@ -1960,6 +1971,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void BakeZoom()
     {
         if (_zoomBaked || _viewOwned is null)
+        {
+            return;
+        }
+
+        // 同上：正在平移（图片被拖开 / 缩放锚在边角）时不烤，
+        // 否则元素一放大就会在平移方向上被画布切掉一条。
+        if (_tx != 0 || _ty != 0)
         {
             return;
         }
@@ -4134,6 +4152,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Finish();
     }
 
+    // ===================== 临时自检：D3D 缩放渲染探针（交付前删除） =====================
     private static void Finish()
     {
         _ = Task.Run(async () =>
