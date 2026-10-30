@@ -80,7 +80,8 @@
                                    ToolTip="{Binding DirLabel}"
                                    Margin="0,0,0,6" />
 
-                        <StackPanel Grid.Row="1" Orientation="Horizontal">
+                        <!-- 窄栏（最小 260）时四个按钮放不下一行，用 WrapPanel 自动换行 -->
+                        <WrapPanel Grid.Row="1" Orientation="Horizontal">
                             <Button Content="{Binding SortDirLabel}"
                                     Style="{StaticResource SortButton}"
                                     ToolTip="名称正序 / 倒序切换"
@@ -96,7 +97,11 @@
                                     ToolTip="回到上一级目录（退格键同效）"
                                     IsEnabled="{Binding CanGoUp}"
                                     Click="ActUpDir" />
-                        </StackPanel>
+                            <Button Content="选择文件夹"
+                                    Style="{StaticResource SortButton}"
+                                    ToolTip="挑一个文件夹，只看这一层（子文件夹在列表里可以再点进去）"
+                                    Click="ActFolder" />
+                        </WrapPanel>
                     </Grid>
 
                     <!-- 列标题：三列宽度与列表行绑的是同一组属性，永远对齐 -->
@@ -405,7 +410,6 @@
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                     <Button Content="打开图库" Style="{StaticResource ToolButton}" Click="ActGallery" />
                     <Button Content="选择图片" Style="{StaticResource ToolButton}" Click="ActFiles" />
-                    <Button Content="选择文件夹" Style="{StaticResource ToolButton}" Click="ActFolder" />
                     <Button Content="回到上次" Style="{StaticResource ToolButton}" Click="ActResume" />
                     <Button Content="选项" Style="{StaticResource ToolButton}" Margin="7,3,3,3" Click="ActOptions" />
                     <Button Content="全屏" Style="{StaticResource ToolButton}" Click="ActFull" />
