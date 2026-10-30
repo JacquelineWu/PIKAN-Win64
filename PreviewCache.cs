@@ -6,7 +6,7 @@ namespace PIKAN;
 /// <summary>
 /// 后台预载缓存，与鸿蒙版 previews 数组对应。
 ///
-/// 目的是「翻页不等解码」：后台把当前位置前后各 20 张**按可显示清晰度**解码并缓存，
+/// 目的是「翻页不等解码」：后台把当前位置前后各 50 张**按可显示清晰度**解码并缓存，
 /// 切图时命中就直接上主视图，不用再解码（这是载入快的关键）。
 /// 缓存的清晰度档位 Edge 由主窗口按画布尺寸动态决定（见 MainWindow.PreloadTargetEdge）。
 ///
@@ -23,9 +23,9 @@ public sealed class PreviewCache
 {
     public const int QuickEdge = 768;      // 未命中缓存时的低清占位档位（单张约 1.7MB）
     public const int MinEdge = 1024;       // 预载档位下限
-    public const int MaxEdge = 1536;       // 预载档位上限：41 张 × 约 7MB ≈ 290MB，再大就吃不消了
-    public const int Capacity = 48;        // 窗口 41 张，留 7 张余量
-    public const long MaxBytes = 320L * 1024 * 1024;
+    public const int MaxEdge = 1536;       // 预载档位上限：101 张 × 约 6.3MB ≈ 640MB，再大就吃不消了
+    public const int Capacity = 112;       // 窗口 101 张，留 11 张余量
+    public const long MaxBytes = 768L * 1024 * 1024;
 
     /// <summary>当前预载档位（长边像素）。画布尺寸变化时由主窗口更新。</summary>
     public int Edge { get; set; } = 1280;

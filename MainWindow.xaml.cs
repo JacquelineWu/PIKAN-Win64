@@ -58,9 +58,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>按下到抬起若移动超过该距离（px）就判定为拖拽平移，不触发点击缩放。</summary>
     private const double ClickMoveTol = 4;
 
-    // ---- 后台预载窗口：前后各 20 张，解码成「可显示清晰度」缓存起来 ----
-    private const int PreloadFwd = 20;
-    private const int PreloadBack = 20;
+    // ---- 后台预载窗口：前后各 50 张，解码成「可显示清晰度」缓存起来 ----
+    private const int PreloadFwd = 50;
+    private const int PreloadBack = 50;
 
     /// <summary>
     /// 预载命中后，停手多久再补一张全清（画布长边 ×2）。
@@ -123,8 +123,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private readonly DispatcherTimer _slideTimer = new();
     private readonly DispatcherTimer _posTimer = new() { Interval = TimeSpan.FromMilliseconds(PosSaveMs) };
 
-    /// <summary>鼠标停在一行上多久才取缩略图（快速划过整列时不该连解几十张）。</summary>
-    private readonly DispatcherTimer _hoverTimer = new() { Interval = TimeSpan.FromMilliseconds(140) };
 
     /// <summary>当前悬停的那一行（同一行内移动只挪位置，不重取图）。</summary>
     private FsEntry? _hoverEntry;
@@ -134,6 +132,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     /// <summary>取图序号：异步解码回来的路上鼠标可能早已划走，靠它丢弃过期结果。</summary>
     private int _hoverSeq;
+
+    /// <summary>
+    /// 解码闸门：划过一整列时会连着换几十行，这里保证**同时最多一个解码在跑**，
+    /// 且排队期间发现已经不是最新那行就直接跳过（中间那些白解）。
+    /// 悬停缩略图不能跟翻页抢 CPU，这是唯一的限流点。
+    /// </summary>
+    private readonly SemaphoreSlim _hoverGate = new(1, 1);
 
     // ---- 档案 ----
     private string _sourceLabel = "尚未打开";
@@ -327,7 +332,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _slideTimer.Interval = TimeSpan.FromMilliseconds(SlideIntervalMs);
         _slideTimer.Tick += (_, _) => Go(1);
         _posTimer.Tick += (_, _) => { _posTimer.Stop(); FlushPos(); };
-        _hoverTimer.Tick += HoverTimer_Tick;
 
         Loaded += (_, _) => UpdateTransform();
         Closed += (_, _) => Perf.FlushSync();
@@ -2501,7 +2505,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         _previews.EvictOutside(_items, _cur, PreloadBack, PreloadFwd, MainImage.Source, LowImage.Source);
 
-        // 显存缓存不跟着窗口立刻释放：那样缓存大小恒等于窗口大小（41 张 / 258MB），
+        // 显存缓存不跟着窗口立刻释放：那样缓存大小恒等于窗口大小（101 张 / 640MB），
         // 配额给到 50% 也用不上。改由配额 + LRU 兜底（见 GpuImageCache.Put）：
         // 翻过的图继续留着，往回翻零成本；一直往前翻则挤掉最旧的，总量不会失控。
         // --tightvram 可回到旧的紧跟随行为，用于对比收益。
@@ -3314,7 +3318,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>
     /// 预载清晰度档位：取「画布长边 ×1.15」，夹在 1024–1600 之间，再量化到 256 的倍数。
     /// 量化是为了窗口每变几像素不至于整批重解码。
-    /// 上限 1600 是内存约束：41 张 × 约 6.8MB ≈ 280MB，再大就吃不消了；
+    /// 上限 1536 是内存约束：101 张 × 约 6.3MB ≈ 640MB，再大就吃不消了；
     /// 真正「正在看」的那张仍会单独解到全清（画布长边 ×2）。
     /// </summary>
     private int PreloadTargetEdge()
@@ -3363,7 +3367,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     // ==================== 悬停缩略图 ====================
     // 鼠标停在左侧档案名上时，在鼠标旁边浮出这张图的小图。
-    // 图优先取自预载缓存（当前位置前后各 20 张已经解码好了，直接拿），
+    // 图优先取自预载缓存（当前位置前后各 50 张已经解码好了，直接拿，鼠标一到图就出来），
     // 没命中才后台解一张 384 的小图，并进悬停自己的小缓存（不挤占主预载缓存）。
 
     private void FileList_PreviewMouseMove(object sender, MouseEventArgs e)
@@ -3387,11 +3391,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         if (!ReferenceEquals(entry, _hoverEntry))
         {
-            // 换了一行：先收起旧的，停稳 140ms 再取新图
+            // 换了一行：立刻取新图（不等——鼠标停上去就该出，缓存里有的话同步就有）
             HideHoverThumb();
             _hoverEntry = entry;
-            _hoverTimer.Stop();
-            _hoverTimer.Start();
+            _ = ShowHoverThumbAsync(entry);
             return;
         }
 
@@ -3419,24 +3422,37 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         return (d as ListBoxItem)?.DataContext as FsEntry;
     }
 
-    private async void HoverTimer_Tick(object? sender, EventArgs e)
+    /// <summary>
+    /// 取一行档案的缩略图并显示。缓存里有就是同步命中、当场显示（预载的那一百张里
+    /// 基本都有，所以绝大多数情形下是「鼠标一到图就出来」，没有任何等待）；
+    /// 只有窗口外的图才需要后台解码——那张图会在解码完成后自己补上。
+    /// </summary>
+    private async Task ShowHoverThumbAsync(FsEntry entry)
     {
-        _hoverTimer.Stop();
-        FsEntry? entry = _hoverEntry;
-        if (entry is null || !entry.IsImage)
-        {
-            return;
-        }
-
         int seq = ++_hoverSeq;
-        BitmapSource? src = null;
-        try
+
+        BitmapSource? src = HoverThumbCache.Instance.Peek(entry.Path, _previews, _opts.ExifRotate);
+        if (src is null)
         {
-            src = await HoverThumbCache.Instance.GetAsync(entry.Path, _previews, _opts.ExifRotate);
-        }
-        catch (Exception ex)
-        {
-            GpuAccel.WriteLog("hover thumb 取图失败 " + ex.Message);
+            await _hoverGate.WaitAsync();
+            try
+            {
+                // 排队期间鼠标已经划到别的行 → 这张不值得解了
+                if (seq != _hoverSeq)
+                {
+                    return;
+                }
+
+                src = await HoverThumbCache.Instance.GetAsync(entry.Path, _previews, _opts.ExifRotate);
+            }
+            catch (Exception ex)
+            {
+                GpuAccel.WriteLog("hover thumb 取图失败 " + ex.Message);
+            }
+            finally
+            {
+                _hoverGate.Release();
+            }
         }
 
         // 回来的路上鼠标可能早已划走／换了目录，结果作废
@@ -3505,7 +3521,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void HideHoverThumb()
     {
-        _hoverTimer.Stop();
         _hoverEntry = null;
         _hoverSeq++;          // 让在路上的解码结果作废
         HoverThumb.IsOpen = false;

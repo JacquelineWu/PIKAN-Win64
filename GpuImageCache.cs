@@ -43,7 +43,7 @@ public sealed class GpuImageCache
 
     /// <summary>
     /// 紧跟随窗口（--tightvram）：翻页时立刻释放窗口外的图。
-    /// 默认关——那样缓存大小恒等于窗口大小（41 张 / 258MB），配额给到 50% 也用不上。
+    /// 默认关——那样缓存大小恒等于窗口大小（101 张 / 640MB），配额给到 50% 也用不上。
     /// 只作 A/B 对照用。
     /// </summary>
     public static bool TightWindow { get; set; }
@@ -103,9 +103,11 @@ public sealed class GpuImageCache
                 want = Math.Min(want, ceiling - others);
             }
 
-            // 下限 256MB ≈ 一个满档预载窗口（41 张 / 233MB）。低于这个数窗口里的图
+            // 下限 640MB ≈ 一个满档预载窗口（101 张 / 610MB）。低于这个数窗口里的图
             // 就会被 LRU 挤掉，翻回去还得重新上传，反而更卡 —— 显存再紧也先保住窗口。
-            _maxBytes = Math.Clamp(want, 256L * 1024 * 1024, ceiling);
+            // 下限不能超过配额上限（小显存机器），所以先跟 ceiling 取小。
+            long floor = Math.Min(640L * 1024 * 1024, ceiling);
+            _maxBytes = Math.Clamp(want, floor, ceiling);
             return _maxBytes;
         }
     }
