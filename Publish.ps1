@@ -1,19 +1,40 @@
-# PIKAN 一键出包：编译 → 发布便携版 → 签名
+# PIKAN 一键出包：编译 → 发布 → 签名
 #
-# 唯一的发布形态是 portable\（自包含多文件目录，不做运行时自解压，双击即开）。
-# 单文件 exe 已弃用：它要把 WPF 的 native 组件自解压到临时目录，被拦时是「双击毫无反应」的静默退出。
+# 两种形态（默认出单文件，这是拿去分发的形态）：
+#
+#   单文件  release-portable\PIKAN.exe
+#                            一个文件走天下。体积靠 EnableCompressionInSingleFile 压掉一大半
+#                            （156 MB 的多文件目录 → 约 45 MB 的单个 exe）。
+#                            早年放弃单文件是因为它要把 WPF 的 native 组件自解压到 %TEMP%，
+#                            被安全软件拦住就是「双击毫无反应」；实测 .NET 10 已经不再落地
+#                            那个解压目录（直接从 bundle 里加载），这条路重新可用了。
+#
+#   便携目录 portable\       多文件目录。-Portable 切过来，调试 / 出现问题时对照用。
 #
 # 用法（PowerShell 7）：
-#   pwsh .\Publish.ps1                # Release 发布到 .\portable 并签名
-#   pwsh .\Publish.ps1 -NoSign        # 只发布，不签名（本机快速调试）
-#   pwsh .\Publish.ps1 -Out D:\PIKAN  # 输出到别处（拷给别人时直接指定 U 盘路径）
+#   pwsh .\Publish.ps1                  # 出单文件 release-portable\PIKAN.exe 并签名
+#   pwsh .\Publish.ps1 -NoSign          # 只发布，不签名（本机快速验证）
+#   pwsh .\Publish.ps1 -Portable        # 出便携目录形态
+#   pwsh .\Publish.ps1 -Out D:\PIKAN    # 输出到别处（直接指定 U 盘路径）
+#
+# 注意 -Out 目录会被清空重建：它必须是发布产物目录（release-portable\ / portable\ / 空目录），
+# 别指向放着自己东西的文件夹。
+#
+# ★ PublishTrimmed 别再试了（2026-10-30 实测），详见 PIKAN.csproj 里的注释。
+#   结论：WPF 的 XAML 引擎靠反射创建 TemplateContentLoader，trimmer 看不见，
+#    MainWindow.InitializeComponent() 直接 MissingMethodException，连窗口都出不来。
 
 param(
-    [string] $Out = (Join-Path $PSScriptRoot 'portable'),
+    [string] $Out,
+    [switch] $Portable,
     [switch] $NoSign
 )
 
 $ErrorActionPreference = 'Stop'
+
+if (-not $Out) {
+    $Out = Join-Path $PSScriptRoot ($Portable ? 'portable' : 'release-portable')
+}
 
 $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue |
     Where-Object { $_.Source -notlike '*Program Files (x86)*' } |
@@ -30,6 +51,7 @@ if (-not $dotnet) {
 }
 
 Write-Host "dotnet: $($dotnet.Source)" -ForegroundColor DarkGray
+Write-Host "形态:   $(if ($Portable) { '便携目录（多文件）' } else { '单文件 exe' })" -ForegroundColor DarkGray
 
 Set-Location $PSScriptRoot
 
@@ -57,29 +79,69 @@ function Invoke-Dotnet {
 # 直接写在命令行里）——后者会被 shell 当成本函数的参数名去解析，
 # -o / -p 恰好都能对上 -OutVariable / -OutBuffer / -ProgressAction 等通用参数，报 “ambiguous”。
 $buildArgs = @('build', '-c', 'Release')
+
 $publishArgs = @(
     'publish', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true',
-    '-p:PublishSingleFile=false', '-p:DebugType=none', '-p:SatelliteResourceLanguages=en',
+    '-p:DebugType=none', '-p:SatelliteResourceLanguages=en',
     '--output', $Out
 )
 
-Write-Host "`n[1/3] 编译 Release ..." -ForegroundColor Cyan
+if ($Portable) {
+    $publishArgs += @('-p:PublishSingleFile=false')
+}
+else {
+    # 三条一起才是「一个文件也能跑」的全部条件：
+    #   PublishSingleFile                     打包成一个 exe
+    #   IncludeNativeLibrariesForSelfExtract  native 库（wpfgfx / d3dcompiler 等）进 bundle
+    #   EnableCompressionInSingleFile         启用压缩，体积再减一半
+    $publishArgs += @(
+        '-p:PublishSingleFile=true',
+        '-p:IncludeNativeLibrariesForSelfExtract=true',
+        '-p:EnableCompressionInSingleFile=true'
+    )
+}
+
+Write-Host "`n[1/4] 编译 Release ..." -ForegroundColor Cyan
 Invoke-Dotnet @buildArgs
 
-Write-Host "`n[2/3] 发布便携版 → $Out" -ForegroundColor Cyan
+Write-Host "`n[2/4] 清空并重建 $Out ..." -ForegroundColor Cyan
+if (Test-Path $Out) {
+    Remove-Item (Join-Path $Out '*') -Recurse -Force -ErrorAction SilentlyContinue
+}
+else {
+    New-Item -ItemType Directory -Path $Out -Force | Out-Null
+}
+
+Write-Host "`n[3/4] 发布 → $Out" -ForegroundColor Cyan
 Invoke-Dotnet @publishArgs
 
 $exe = Join-Path $Out 'PIKAN.exe'
 if (-not (Test-Path $exe)) { throw "发布完成但找不到 $exe" }
+
+# 体积报告：单文件看 exe 本身；便携版才是整个目录
 $sizeMb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
-Write-Host "  PIKAN.exe  $sizeMb MB" -ForegroundColor DarkGray
+$files = Get-ChildItem $Out -File
+
+if ($Portable) {
+    $dirMb = [math]::Round((($files | Measure-Object Length -Sum).Sum) / 1MB, 1)
+    Write-Host "  PIKAN.exe $sizeMb MB；整个目录 $dirMb MB · $($files.Count) 个文件" -ForegroundColor DarkGray
+}
+else {
+    Write-Host "  单文件 PIKAN.exe $sizeMb MB（目录内 $($files.Count) 个文件）" -ForegroundColor DarkGray
+    if ($files.Count -ne 1) {
+        Write-Host "  !! 期望只剩一个文件，实际还有 $($files.Count - 1) 个附属文件" -ForegroundColor Yellow
+        $files | Where-Object { $_.Name -ne 'PIKAN.exe' } | ForEach-Object {
+            Write-Host "     · $($_.Name)  $([math]::Round($_.Length / 1KB, 1)) KB" -ForegroundColor DarkGray
+        }
+    }
+}
 
 # 低完整性标签清理：
 # 某些受管控的工作目录（例如 agent 工作区）整棵树都带着
 # Mandatory Label\Low Mandatory Level 的继承 ACE，从这里发布的 exe 启动后
 # 会被降成低完整性进程——写不了 HKCU（图形首选项申请失败）、临时目录也受限。
 # 拷到别处使用不受影响，但直接在本目录双击就会中招，这里顺手把标签拉回 Medium。
-Write-Host "`n[3.5/3] 完整性标签检查 ..." -ForegroundColor Cyan
+Write-Host "`n[3.5/4] 完整性标签检查 ..." -ForegroundColor Cyan
 $label = (icacls $exe 2>$null | Select-String 'Mandatory Label\\(\w+) Mandatory Level')
 if ($label -and $label.Matches.Groups[1].Value -ne 'Medium') {
     Write-Host "  发现 $($label.Matches.Groups[1].Value) 强制标签，尝试改为 Medium ..." -ForegroundColor Yellow
@@ -97,12 +159,17 @@ else {
 }
 
 if ($NoSign) {
-    Write-Host "`n[3/3] 跳过签名（-NoSign）" -ForegroundColor Yellow
+    Write-Host "`n[4/4] 跳过签名（-NoSign）" -ForegroundColor Yellow
 }
 else {
-    Write-Host "`n[3/3] 签名 ..." -ForegroundColor Cyan
+    Write-Host "`n[4/4] 签名 ..." -ForegroundColor Cyan
     & (Join-Path $PSScriptRoot 'Sign.ps1') -Exe $exe
     if ($LASTEXITCODE -ne 0) { throw "签名失败（exit $LASTEXITCODE）" }
 }
 
-Write-Host "`n完成：双击 $exe 即可运行；整个目录可直接拷到任意 Win64 机器。" -ForegroundColor Green
+if ($Portable) {
+    Write-Host "`n完成：双击 $exe 即可运行；整个目录可直接拷到任意 Win64 机器。" -ForegroundColor Green
+}
+else {
+    Write-Host "`n完成：$exe 是唯一要分发的文件，拷到任意 Win64 机器双击即可。" -ForegroundColor Green
+}

@@ -12,9 +12,10 @@ using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Interop;
 using System.Windows.Threading;
-using Forms = System.Windows.Forms;
-
-// WinForms（只为 FolderBrowserDialog 引入）与 WPF 有一批同名类型，这里显式指向 WPF 的那一个
+// WinForms 已从依赖里移除（只为省那 22 MB 体积、并解除 MSBuild 对 trimming 的硬拦截），
+// 原先靠它做的三件事现在都走 NativeWin32：双击间隔、屏幕工作区、文件夹选择对话框。
+// 下面这批别名是当年 WinForms 在场时为消歧义加的，留着不影响正确性，反而更省事——
+// 反正 WPF 里这些名字也确实有同名不同姓的。
 using Point = System.Windows.Point;
 using DataFormats = System.Windows.DataFormats;
 using DragDropEffects = System.Windows.DragDropEffects;
@@ -328,7 +329,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// 抖动那一下落在**已经换好的新列表**的同一屏幕位置上，那里可能正好是个子文件夹，
     /// 不拦就会「点一下进了两层」。取上限 400 是为了别把双击间隔设得很大的人卡住。
     /// </summary>
-    private static readonly int NavQuietMs = Math.Min(Forms.SystemInformation.DoubleClickTime, 400);
+    private static readonly int NavQuietMs = Math.Min(NativeWin32.DoubleClickTimeMs, 400);
 
     /// <summary>静默期截止时刻（Environment.TickCount64）。</summary>
     private long _navQuietUntil;
@@ -3127,20 +3128,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void ActFolder(object sender, RoutedEventArgs e)
     {
-        using Forms.FolderBrowserDialog dlg = new()
-        {
-            Description = "选择要浏览的图片文件夹（含子文件夹）",
-            UseDescriptionForTitle = true,
-            ShowNewFolderButton = false
-        };
-
-        if (dlg.ShowDialog() != Forms.DialogResult.OK)
+        // 标题即提示语：原先是 Description + UseDescriptionForTitle = true，落在窗口标题栏上
+        string? dir = NativeWin32.PickFolder(this, "选择要浏览的图片文件夹（含子文件夹）");
+        if (dir is null)
         {
             Status = "已取消选择";
             return;
         }
 
-        _ = LoadFolderAsync(dlg.SelectedPath, "folder", recursive: false);
+        _ = LoadFolderAsync(dir, "folder", recursive: false);
     }
 
     /// <summary>
@@ -3998,13 +3994,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         double mx = _hoverMouse.X / dpi;   // 鼠标（屏幕 DIP）
         double my = _hoverMouse.Y / dpi;
 
-        System.Drawing.Rectangle wa = Forms.Screen
-            .FromPoint(new System.Drawing.Point((int)_hoverMouse.X, (int)_hoverMouse.Y))
-            .WorkingArea;
-        double left = wa.Left / dpi;
-        double right = wa.Right / dpi;
-        double top = wa.Top / dpi;
-        double bottom = wa.Bottom / dpi;
+        // 取工作区是为了别让浮层被任务栏吃掉。拿不到（极端环境）就干脆不开：
+        // 宁可少显示一次，也不要把它摆到明显跑偏的位置（0,0 附近）。
+        if (!NativeWin32.TryGetWorkArea((int)_hoverMouse.X, (int)_hoverMouse.Y,
+                                        out int waL, out int waT, out int waR, out int waB))
+        {
+            HideHoverThumb();
+            return;
+        }
+
+        double left = waL / dpi;
+        double right = waR / dpi;
+        double top = waT / dpi;
+        double bottom = waB / dpi;
 
         // 与鼠标的间距同样要换回布局单位，否则 18 会被当成 18 DIP（125% DPI 下就变成 22.5px）
         double gap = 18 / dpi;

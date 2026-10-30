@@ -8,7 +8,11 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <UseWPF>true</UseWPF>
-    <UseWindowsForms>true</UseWindowsForms>
+
+    <!-- 刻意关掉 Windows Forms：开它会带进 ~22 MB 的 WinForms 程序集（连它的设计器那几个），
+         而且只要它在，MSBuild 就硬拦 trimming（error NETSDK1175）。项目原本只用它的三个 API
+         ——双击间隔、屏幕工作区、文件夹对话框——现在都由 NativeWin32.cs 自己实现。 -->
+    <UseWindowsForms>false</UseWindowsForms>
     <AssemblyName>PIKAN</AssemblyName>
     <RootNamespace>PIKAN</RootNamespace>
     <Version>1.0.0</Version>
@@ -30,22 +34,32 @@
   </ItemGroup>
 
   <!--
-    日常开发：dotnet build  →  框架依赖的 PIKAN.exe（需本机装 .NET 10 桌面运行时）
+    两种发布形态，一键出包（含签名）用 Publish.ps1：
 
-    分发：只出「便携版」（自包含多文件目录 portable\）。曾经也发过单文件 exe，已弃用：
-    WPF 的 native 组件进不了 bundle，靠运行时自解压到临时目录，一旦被安全软件或目录权限
-    拦住就是「双击毫无反应」的静默退出（本机复现过 Error code: 5）。便携版不做自解压，更稳。
+      单文件  dist\PIKAN.exe   ← 分发用这个（pwsh .\Publish.ps1）
+                dotnet publish -c Release -r win-x64 /p:SelfContained=true ^
+                  /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true ^
+                  /p:EnableCompressionInSingleFile=true /p:DebugType=none ^
+                  /p:SatelliteResourceLanguages=en -o dist
 
-      dotnet publish -c Release -r win-x64 /p:SelfContained=true -p:PublishSingleFile=false ^
-        -p:DebugType=none -p:SatelliteResourceLanguages=en -o portable
+      便携目录 portable\        ← 多文件，调试/对照用（pwsh .\Publish.ps1 -Portable）
 
-    一键出包（含签名）用 Publish.ps1。Kernels\pikan.ptx 是嵌入资源，任何形态都读得到。
+    曾经放弃过单文件：那时的实现要把 WPF 的 native 组件自解压到 %TEMP%，
+    被安全软件或目录权限一拦就是「双击毫无反应」的静默退出（本机复现过 Error code: 5）。
+    .NET 10 重测已不成立：SingleFile 的 native 库直接从 bundle 里加载，
+    跑完之后 %TEMP%/.net/ 下没有生成任何提取目录，bench（58 张图 + GPU 重采样）照常跑完。
+    所以现在单文件是首选形态，便携目录退居调试/兜底。
+
+    ★ 别再试 PublishTrimmed 了（2026-10-30 实测，两次都失败）：
+      1. SDK 硬拦：UseWindowsForms → NETSDK1175；即便关掉 WinForms，UseWPF → NETSDK1168。
+         后门是 -p:_SuppressWpfTrimError=true（见 Microsoft.NET.RuntimeIdentifierInference.targets），
+         确实能编译通过，156 MB → 45 MB，看着很美；
+      2. 但跑起来必崩：WPF 的 XAML 引擎在 DeferredLoad 时用 Activator.CreateInstance 反射
+         创建 System.Windows.TemplateContentLoader，trimmer 看不见这次反射，把构造函数裁掉了 ——
+         MainWindow.InitializeComponent() 直接抛 MissingMethodException，连窗口都出不来。
+      这是 XAML 引擎的固有行为，改不了。想靠 TrimmerRootAssembly 全场保留等于不 trim，没意义。
+
+    Kernels\pikan.ptx 是嵌入资源，两种形态都读得到。
   -->
-
-  <PropertyGroup>
-    <!-- 锁死：避免哪天手滑 publish 出单文件 exe -->
-    <PublishSingleFile>false</PublishSingleFile>
-    <IncludeNativeLibrariesForSelfExtract>false</IncludeNativeLibrariesForSelfExtract>
-  </PropertyGroup>
 
 </Project>

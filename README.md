@@ -230,15 +230,13 @@ bin\Release\net10.0-windows\PIKAN.exe
 需要 **.NET 10 SDK**（`net10.0-windows`，含 WPF / WindowsDesktop 运行时）。
 本仓库用 Visual Studio 2026 / `dotnet build` 均可，无第三方包，restore 秒过。
 
-### 便携版（唯一的发布形态）
+### 单文件版（分发首选）
 
-`portable\PIKAN.exe` 是**自包含多文件版**（整个目录约 155 MB）：
+`release-portable\PIKAN.exe` 是**单个 exe**，约 **59 MB**，要分发的就这一个文件：
 
 - 目标机**不用装 .NET**，也不用装 CUDA Toolkit
-- **不做运行时自解压**——不往 `%TEMP%` 写一个字节，双击即开
+- `PIKAN.ptx`（CUDA kernel）与字典资源都嵌在程序集里，bundle 内读得到
 - 已做代码签名（见「SmartScreen 拦截怎么办」）
-
-把整个 `portable` 文件夹拷到 U 盘 / 别的 Win64 机器即可，双击里面的 `PIKAN.exe` 就用。
 
 一键出包（编译 → 发布 → 签名）：
 
@@ -252,17 +250,59 @@ pwsh .\Publish.ps1 -Out D:\PIKAN  :: 输出到别处，例如直接发到 U 盘
 
 ```bat
 dotnet publish -c Release -r win-x64 --self-contained true ^
-  -p:PublishSingleFile=false -p:DebugType=none -p:SatelliteResourceLanguages=en -o portable
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true ^
+  -p:EnableCompressionInSingleFile=true -p:DebugType=none ^
+  -p:SatelliteResourceLanguages=en -o release-portable
 
-pwsh .\Sign.ps1
+pwsh .\Sign.ps1 -Exe release-portable\PIKAN.exe
 ```
 
-**为什么不再发单文件 exe**：单文件版启动时必须把 WPF 的 native 组件
-（`wpfgfx_cor3.dll`、`PresentationNative_cor3.dll`、`D3DCompiler_47_cor3.dll` 等）
-自解压到临时目录。这一步一旦被安全软件或目录权限拦住，进程会在托管代码**之前**退出，
-而 WPF 程序没有控制台，错误文本无处显示——表现就是「双击毫无反应」。
-本机稳定复现过 `Failed to create directory [...] Error code: 5`（`%TEMP%` 不允许建提取目录）。
-便携版不做自解压，这条失败路径根本不存在，代价只是目录里多一堆 dll。
+**首次启动会发生什么**：single-file 会把 WPF 的 5 个 native 组件
+（`wpfgfx_cor3.dll`、`D3DCompiler_47_cor3.dll`、`PresentationNative_cor3.dll`、
+`PenImc_cor3.dll`、`vcruntime140_cor3.dll`，合计 7.9 MB）
+解压到 `%LOCALAPPDATA%\Temp\.net\PIKAN\<随机串>\`，之后命中缓存不再重复。
+这一步被拦住时的表现是终端里一句 `Failure processing application bundle.`，
+而 WPF 程序没有控制台，双击就是「毫无反应」——**这是单文件版唯一的失败路径**，
+排障时先删掉 `%LOCALAPPDATA%\Temp\.net\PIKAN\` 重开，再看安全软件有没有拦写。
+
+### 便携目录版（多文件，排障/对照用）
+
+`portable\` 是同一套东西的多文件形态（整个目录约 133 MB，244 个文件），
+**不做运行时自解压**，上面那条失败路径不存在。`pwsh .\Publish.ps1 -Portable` 切过来。
+
+```bat
+dotnet publish -c Release -r win-x64 --self-contained true ^
+  -p:PublishSingleFile=false -p:DebugType=none -p:SatelliteResourceLanguages=en -o portable
+```
+
+### 体积是怎么压下来的
+
+| 形态 | 体积 | 文件数 |
+|---|---|---|
+| 多文件目录（去 WinForms 前） | 156 MB | 247 |
+| 多文件目录（去 WinForms 后） | **133 MB** | 244 |
+| 单文件 exe（去 WinForms 后 + 压缩） | **58.7 MB** | 1 |
+| 框架依赖单文件（目标机须装 .NET 10 桌面运行时） | 364 KB | 1 |
+
+主要手段是两件事：
+
+1. **砍掉 Windows Forms**。项目原先只为三个 API 引用它——双击间隔、屏幕工作区、
+   文件夹对话框——代价却是自包含发布里 ~23 MB 的程序集（连它那几个设计器一起）。
+   现在这三条都由 `NativeWin32.cs` 自己实现（`GetDoubleClickTime`、
+   `MonitorFromPoint`+`GetMonitorInfo`、`IFileDialog`）。副作用是省下的不止体积：
+   只要 WinForms 还在，MSBuild 就硬拦 trimming（error NETSDK1175）。
+2. **`EnableCompressionInSingleFile`**。单文件的内建压缩把 133 MB 压到 58.7 MB。
+
+> 想要**极致小**：目标机若已装 .NET 10 桌面运行时，`-p:SelfContained=false`
+> 出的框架依赖单文件只有 364 KB。代价是把「拷过去就能双击」变成了「先装运行时」。
+
+**★ PublishTrimmed 别试了（2026-10-30 实测）**：WPF 自身被 SDK 硬拦
+（error NETSDK1168），后门 `-p:_SuppressWpfTrimError=true` 虽然能编译通过、
+把体积干到 45 MB 看着很美，但跑起来必崩——WPF 的 XAML 引擎在 DeferredLoad 时用
+`Activator.CreateInstance` 反射创建 `System.Windows.TemplateContentLoader`，
+trimmer 看不见这次反射，把构造函数裁掉了，`MainWindow.InitializeComponent()`
+直接抛 `MissingMethodException`，连窗口都出不来。想靠 `TrimmerRootAssembly`
+全场保留等于不 trim。
 
 几个已知事项：
 
@@ -274,19 +314,29 @@ pwsh .\Sign.ps1
 
 ### 双击后毫无反应 / 闪退怎么办
 
-便携版不做自解压，所以**历史故障（单文件版自解压被拒）已经不存在了**。
-如果仍然打不开，按下面顺序定位：
+绝大多数情况下双击就能打开。如果不行，按下面顺序定位：
 
-1. **看崩溃日志**：`%LOCALAPPDATA%\PIKAN\crash.log`。凡是进入 `App` 之后的未处理异常
-   都会写这里并弹窗，不会"静默闪退"。
-2. **在 PowerShell 里跑一次**，把本来看不见的 host 层错误抓出来：
+1. **先看是不是单文件的自解压被拒**（单文件版唯一特有的失败路径）。
+   在 PowerShell 里跑一次，host 层的错误只有这样才看得见：
 
    ```powershell
-   & .\portable\PIKAN.exe 2>&1
+   & .\release-portable\PIKAN.exe 2>&1
    ```
+
+   如果打印 `Failure processing application bundle.`，说明 `%LOCALAPPDATA%\Temp\.net\PIKAN\`
+   下写不进去——先看安全软件有没有拦，再手工删掉这个目录重开一次。
+   换成 `portable\` 多文件版可以彻底绕开这条路径（它不做自解压）。
+
+2. **看崩溃日志**：`%LOCALAPPDATA%\PIKAN\crash.log`。凡是进入 `App` 之后的未处理异常
+   都会写这里并弹窗，不会"静默闪退"。
 
 3. **看 Windows 事件日志**：应用程序日志里的 `.NET Runtime` / `Application Error`，
    以及 GPU 相关的看 `%LOCALAPPDATA%\PIKAN\gpu.log`。
+
+4. **低完整性进程**：如果 exe 落在整棵树都带
+   `Mandatory Label\Low Mandatory Level` 的目录里（某些受管控的工作目录、沙箱工作区），
+   启动后进程会被降级，表现为写不了注册表也写不了临时目录——症状和上一条一模一样。
+   `Publish.ps1` 出包时会自动把标签拉回 Medium。
 
 程序侧已加固：未处理异常会弹窗提示并写入
 `%LOCALAPPDATA%\PIKAN\crash.log`，不会再"静默闪退"；CUDA 探测也挪到了后台线程，
@@ -303,7 +353,7 @@ pwsh .\Sign.ps1
 | 自签证书（已做） | 自己的多台机器 | 见下，拷 exe 时带上 `PIKAN-CodeSigning.cer` |
 | 购买代码签名证书 | 对外公开发布 | OV 证书约 ¥1000–3000/年；EV 还能立刻建立 SmartScreen 信誉 |
 
-**发布出的 `portable\PIKAN.exe` 已签名**：SHA256 + DigiCert RFC3161 时间戳，发布者
+**发布出的 `release-portable\PIKAN.exe`（单文件）与 `portable\PIKAN.exe` 都已签名**：SHA256 + DigiCert RFC3161 时间戳，发布者
 `CN=JacquelineWu (PIKAN)`，有效期至 2031-10-27（有时间戳，证书过期后签名依然有效）。
 
 拷到另一台机器时，把 `PIKAN-CodeSigning.cer` 一起拷过去并执行：
@@ -316,7 +366,8 @@ certutil -addstore -user TrustedPublisher PIKAN-CodeSigning.cer
 重新编译后要重签：
 
 ```bat
-pwsh .\Sign.ps1                :: 签 portable\PIKAN.exe
+pwsh .\Sign.ps1                :: 签 release-portable\PIKAN.exe（默认形态）
+pwsh .\Sign.ps1 -Exe portable\PIKAN.exe   :: 签便携目录那份
 pwsh .\Sign.ps1 -Force         :: 强制重签
 pwsh .\Sign.ps1 -NewCert       :: 换一张新证书
 ```
@@ -423,8 +474,9 @@ PIKAN-Win64/
 ├── D3d9.cs                   D3D9Ex 手写 COM 封装（零依赖，供 CUDA 互操作用）
 ├── Perf.cs                   分段计时 + 帧冻结监控（`--bench` 开启）
 ├── Kernels/pikan.ptx         CUDA kernel 源码（驱动运行时 JIT）
-├── Publish.ps1               一键出包：编译 → 发布 portable\ → 签名
-├── Sign.ps1                  Authenticode 自签（默认签 portable\PIKAN.exe）
+├── Publish.ps1               一键出包：编译 → 发布 release-portable\ 单文件 → 签名
+├── Sign.ps1                  Authenticode 自签（默认签 release-portable\PIKAN.exe）
+├── NativeWin32.cs            自实现的 Win32/COM 小封装（替掉 WinForms，省 ~23 MB）
 └── LICENSE / README.md
 ```
 
