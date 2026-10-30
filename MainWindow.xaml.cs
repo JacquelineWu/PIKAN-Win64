@@ -507,6 +507,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         get => new(_fullscreen ? 0 : _listWidth, GridUnitType.Pixel);
         set
         {
+            // 全屏时这一列被压成 0，TwoWay 绑定会把这个 0 回写进来。
+            // 必须挡掉：否则 0 会被夹到下限 ListMinWidth 写进 _listWidth，
+            // 退出全屏后左栏就回不到用户自己拖出来的宽度了。
+            if (_fullscreen)
+            {
+                return;
+            }
+
             // 太窄会把三列挤没，给个下限
             double w = Math.Clamp(value.Value, ListMinWidth, ListMaxWidth);
             if (Math.Abs(_listWidth - w) < 0.5)
@@ -3418,6 +3426,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _pendingReload = true; // 画布尺寸变了 → 落地后按新尺寸重解，避免把旧分辨率拉大发虚
         OnPropertyChanged(nameof(ChromeVisibility));
         OnPropertyChanged(nameof(FullscreenVisibility));
+
+        // 左栏那一列必须一起收/放：只把内容 Collapsed 的话，列还占着原来的宽度，
+        // 全屏画面左边会留下一条深色竖框（宽度 = 用户拖出来的左栏宽度）。
+        OnPropertyChanged(nameof(ListColumnWidth));
 
         if (on)
         {
