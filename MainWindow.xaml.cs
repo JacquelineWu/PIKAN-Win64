@@ -1512,6 +1512,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// 以某个点为锚缩放。
     /// 设 d 为光标相对画面中心的偏移、t 为平移量、z 为缩放，光标下的内容点满足 d = t + z·p。
     /// 要让它缩放后仍在原位：d = t' + z'·p = t' + (z'/z)(d − t) ⇒ t' = d − (z'/z)(d − t)。
+    ///
+    /// 锚点只在**图片矩形内**生效：点在图片外的灰底上时若仍按点击点锚定，
+    /// 画面会被朝反方向猛推（小图 fit 后四周留灰，点下方灰底一下就能把图顶出画布
+    /// 23%，看起来像被裁掉一截）。此时改围绕画布中心缩放（t' = k·t，视图中心的
+    /// 内容保持不动），画面原地放大、溢出量上下均分，行为可预期。
     /// </summary>
     private void ZoomAt(double factor, double ax, double ay)
     {
@@ -1524,12 +1529,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         double k = next / old;
-        if (_rot == 0 && ax >= 0 && ay >= 0)
+        if (_rot == 0 && ax >= 0 && ay >= 0 && AnchorInsideImage(ax, ay))
         {
             double dx = ax - CanvasArea.ActualWidth / 2;
             double dy = ay - CanvasArea.ActualHeight / 2;
             _tx = dx - k * (dx - _tx);
             _ty = dy - k * (dy - _ty);
+        }
+        else if (_rot == 0)
+        {
+            // 点在图片外的灰底上：围绕画布中心缩放（平移随 zoom 等比保留）。
+            // 等价于把锚点放在画布中心：t' = 0 − k(0 − t) = k·t。
+            _tx *= k;
+            _ty *= k;
         }
         else
         {
@@ -1545,6 +1557,29 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         RefreshImageInfo();
         ScheduleRefine();
         Status = $"缩放 {ZoomText}";
+    }
+
+
+    /// <summary>
+    /// 点击点是否落在当前图片的显示矩形内（画布坐标）。
+    /// 用的是缩放**前**的几何：ZoomAt 在 UnbakeZoom 之前调用，
+    /// 显示尺寸 = 原图 × FitFactor × 旧 zoom，中心 = 画布中心 + 平移量。
+    /// </summary>
+    private bool AnchorInsideImage(double ax, double ay)
+    {
+        double f = FitFactor();
+        if (f <= 0 || _imgW <= 0 || _imgH <= 0)
+        {
+            return false;
+        }
+
+        double cw = CanvasArea.ActualWidth;
+        double ch = CanvasArea.ActualHeight;
+        double iw = _imgW * f * _zoom;
+        double ih = _imgH * f * _zoom;
+        double cx = cw / 2 + _tx;
+        double cy = ch / 2 + _ty;
+        return ax >= cx - iw / 2 && ax <= cx + iw / 2 && ay >= cy - ih / 2 && ay <= cy + ih / 2;
     }
 
     /// <summary>1:1 —— 一个图片像素对应一个屏幕像素。</summary>
