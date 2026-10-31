@@ -221,7 +221,7 @@
                                    TextWrapping="Wrap"
                                    Margin="0,0,0,6"
                                    Visibility="{Binding ResumeHintVisibility}" />
-                        <TextBlock Text="鼠标移到窗口顶部唤出工具栏：点「打开图库」扫描图片库，或「选择图片」挑文件"
+                        <TextBlock Text="用左栏的「选择文件夹」挑一个目录，或把鼠标移到窗口顶部唤出工具栏"
                                    FontSize="11"
                                    Foreground="#5a6272"
                                    TextAlignment="Center"
@@ -463,9 +463,6 @@
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button Content="打开图库" Style="{StaticResource ToolButton}" Click="ActGallery" />
-                    <Button Content="选择图片" Style="{StaticResource ToolButton}" Click="ActFiles" />
-                    <Button Content="回到上次" Style="{StaticResource ToolButton}" Click="ActResume" />
                     <Button Content="选项" Style="{StaticResource ToolButton}" Margin="7,3,3,3" Click="ActOptions" />
                     <Button Content="全屏" Style="{StaticResource ToolButton}" Click="ActFull" />
                     <Button Content="{Binding SlideLabel}"

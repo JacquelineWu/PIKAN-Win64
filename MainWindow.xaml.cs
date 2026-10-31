@@ -315,7 +315,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private bool _playing;
     private string _status = App.SafeMode
         ? "上次异常退出 → 本次以安全模式启动（纯 CPU，不碰显卡）。一切正常的话，下次起自动恢复"
-        : "点顶栏「打开图库」扫描图片库，或「选择图片」挑文件";
+        : "点左栏「选择文件夹」挑一个目录开始看图";
     private string _resumeHint = "";
 
     private MouseButton? _pressBtn;
@@ -1453,40 +1453,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             // 写盘失败无所谓
         }
-    }
-
-    private void ResumeLast()
-    {
-        if (_state.LastIdx < 0 && _state.LastUri.Length == 0)
-        {
-            Status = "还没有记录过浏览位置";
-            return;
-        }
-
-        if (_items.Count > 0)
-        {
-            int i = RestoreIndex(_items);
-            if (i >= 0)
-            {
-                Select(i);
-                Status = $"已回到上次位置：第 {i + 1} / {_items.Count} 张 · {_items[i].DisplayName}";
-                return;
-            }
-
-            Status = $"当前这批图片里没有上次的「{_state.LastName}」（上次来自{_state.LastSrc}）";
-            return;
-        }
-
-        if (_state.Snapshot.Count > 0)
-        {
-            Status = "正在用上次会话的列表恢复…";
-            if (RestoreFromSnapshot())
-            {
-                return;
-            }
-        }
-
-        Status = "上次那批图片找不到了，请重新选择";
     }
 
     // ==================================================================
@@ -3775,53 +3741,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
-    private async void ActGallery(object sender, RoutedEventArgs e)
-    {
-        Diag.Mark("act:gallery");
-        string root = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
-        if (!Directory.Exists(root))
-        {
-            Status = "找不到「图片」文件夹 → 已打开选择文件";
-            ActFiles(sender, e);
-            return;
-        }
-
-        await LoadFolderAsync(root, "gallery", recursive: true);
-    }
-
-    private void ActFiles(object sender, RoutedEventArgs e)
-    {
-        Diag.Mark("act:files → 弹对话框");
-        Microsoft.Win32.OpenFileDialog dlg = new()
-        {
-            Title = "选择图片",
-            Filter = Decoder.DialogFilter,
-            FilterIndex = 1,
-            Multiselect = true
-        };
-
-        if (dlg.ShowDialog(this) != true || dlg.FileNames.Length == 0)
-        {
-            Status = "已取消选择";
-            return;
-        }
-
-        List<ImageItem> picked = dlg.FileNames.Select(p => new ImageItem(p)).ToList();
-        Diag.Mark($"act:files ← {picked.Count} 个文件");
-        _userLoaded = true;
-
-        // 「选择的文件」是挑出来的一批，目录不代表这批照片 → kind 记 files，
-        // 下次启动用列表快照恢复（按目录重扫会把没挑过的图也带进来）。
-        // 目录仍然记下来，作为快照失效时的兜底线索。
-        string? dir = picked.Count > 0 ? Path.GetDirectoryName(picked[0].Path) : null;
-        if (dir is not null)
-        {
-            MarkSource(dir, "files");
-        }
-
-        BrowseDir = null; // 挑出来的一批散图，左侧不显示 .. 与子文件夹
-        ApplyItems(picked, "选择的文件");
-    }
+    // 顶栏原本的「打开图库 / 选择图片 / 回到上次」三个按钮已取消（2026-10-31）：
+    // 挑图的入口统一收到左栏的「选择文件夹」，启动时本来就会自动回到上次的位置，
+    // 再多一个「回到上次」按钮是重复入口。对应的 ActGallery / ActFiles / ActResume
+    // 三个处理器一并删掉，不留死代码。
 
     private void ActFolder(object sender, RoutedEventArgs e)
     {
@@ -5163,7 +5086,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void ActSlide(object sender, RoutedEventArgs e) => ToggleSlide();
     private void ActFull(object sender, RoutedEventArgs e) => SetFull(!_fullscreen);
-    private void ActResume(object sender, RoutedEventArgs e) => ResumeLast();
 
     // ==================================================================
     // 选项（五项开关）
