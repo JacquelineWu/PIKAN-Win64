@@ -143,6 +143,22 @@ if (-not $SkipGitHub) {
 if (-not $SkipGitee) {
     if (-not $GiteeRepo) { $GiteeRepo = Get-RemoteSlug 'gitee' }
     Info "Gitee  仓库：$GiteeRepo"
+
+    # 令牌在**这一步**就取好，别留到 step 6 再提示：step 4（-Force 时清理旧发行版）
+    # 也要用它，留到那时再问会让脚本跑到一半停下来等输入。
+    $plain = Convert-SecureStringToPlain $GiteeToken
+    if (-not $plain -and $env:GITEE_TOKEN) { $plain = $env:GITEE_TOKEN; Info '令牌来源：$env:GITEE_TOKEN' }
+    if (-not $plain) {
+        $sec = Read-Host 'Gitee 私人令牌（需要 projects 权限，输入不回显）' -AsSecureString
+        $plain = Convert-SecureStringToPlain $sec
+        Info '令牌来源：交互式输入'
+    }
+    if (-not $plain) { Die '没有 Gitee 令牌。只发 GitHub 就加 -SkipGitee。' }
+
+    # ★★ 见 step 6 上方「坑①」的注释：URI 一律用字符串拼接，
+    #    写成 "$api/xxx?access_token=$plain" 会被 ?. 运算符把前缀吃掉。
+    $api = "https://gitee.com/api/v5/repos/$GiteeRepo"
+    $tokenQuery = '?access_token=' + $plain
 }
 
 if ($AutoNotes) {
@@ -281,6 +297,41 @@ Ok "正文 $($body.Length) 字符 → $($([IO.Path]::GetFileName($notesFile)))"
 
 Step '4' "打 tag $Tag 并推送两个远端"
 
+# -Force 时先把两站上**同名的旧 Release 删掉**，再去动 tag。顺序反了会出事：
+# Release 是挂在 tag 上的，先删 tag 会让 GitHub 把它降级成「untagged」草稿
+# （2026-10-31 首发 v1.0.1 就是这么踩的）—— 附件虽然传上去了，
+# download/<tag>/xxx 这条路径却直接 404，等于发了个残版本。
+if ($Force) {
+    if (-not $SkipGitHub) {
+        & gh release view $Tag -R $GitHubRepo 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Info '删 GitHub 旧 Release（连同它的附件）'
+            & gh release delete $Tag -R $GitHubRepo -y
+            if ($LASTEXITCODE -ne 0) { Die "gh release delete 失败（exit $LASTEXITCODE）" }
+        }
+        else { Info 'GitHub 上没有旧 Release，不用删' }
+    }
+
+    if (-not $SkipGitee) {
+        $old = $null
+        try {
+            $old = (Invoke-RestMethod -Uri ($api + '/releases' + $tokenQuery) -Method Get -TimeoutSec 60 |
+                Where-Object { $_.tag_name -eq $Tag } | Select-Object -First 1)
+        }
+        catch { Warn "取 Gitee 发行版列表失败：$($_.Exception.Message)" }
+
+        if ($old) {
+            Info "删 Gitee 旧发行版（id=$($old.id)）"
+            try {
+                Invoke-WebRequest -Method Delete -TimeoutSec 60 -UseBasicParsing `
+                    -Uri ($api + '/releases/' + $old.id + $tokenQuery) | Out-Null
+            }
+            catch { Die "删 Gitee 旧发行版失败：$($_.Exception.Message)" }
+        }
+        else { Info 'Gitee 上没有旧发行版，不用删' }
+    }
+}
+
 if ($Force) {
     foreach ($r in $tagExists.Keys) {
         if ($r -eq '__local' -or -not $tagExists[$r]) { continue }
@@ -397,20 +448,9 @@ if ($SkipGitee) {
 else {
     Step '6' "Gitee 发行版 → $GiteeRepo"
 
-    $plain = Convert-SecureStringToPlain $GiteeToken
-    if (-not $plain -and $env:GITEE_TOKEN) { $plain = $env:GITEE_TOKEN; Info '令牌来源：$env:GITEE_TOKEN' }
-    if (-not $plain) {
-        $sec = Read-Host 'Gitee 私人令牌（需要 projects 权限，输入不回显）' -AsSecureString
-        $plain = Convert-SecureStringToPlain $sec
-        Info '令牌来源：交互式输入'
-    }
-    if (-not $plain) { Die '没有 Gitee 令牌。只发 GitHub 就加 -SkipGitee。' }
-
-    $api = "https://gitee.com/api/v5/repos/$GiteeRepo"
-
     $rel = $null
     try {
-        $list = Invoke-RestMethod -Uri "$api/releases?access_token=$plain" -Method Get -TimeoutSec 60
+        $list = Invoke-RestMethod -Uri ($api + '/releases' + $tokenQuery) -Method Get -TimeoutSec 60
         $rel = $list | Where-Object { $_.tag_name -eq $Tag } | Select-Object -First 1
     }
     catch { Die "列取 Gitee 发行版失败：$($_.Exception.Message)" }
