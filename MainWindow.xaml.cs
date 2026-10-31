@@ -313,7 +313,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private bool _topHover;
     private bool _playing;
-    private string _status = "点顶栏「打开图库」扫描图片库，或「选择图片」挑文件";
+    private string _status = App.SafeMode
+        ? "上次异常退出 → 本次以安全模式启动（纯 CPU，不碰显卡）。一切正常的话，下次起自动恢复"
+        : "点顶栏「打开图库」扫描图片库，或「选择图片」挑文件";
     private string _resumeHint = "";
 
     private MouseButton? _pressBtn;
@@ -752,19 +754,37 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
-    public string InfoLine
+    /// <summary>
+    /// 左上角浮层的档案名：不带副档名（.JPG 之类），对开时两页都列。
+    /// 尺寸 / 格式 / 字节数一律不显示——看图时那几行只会挡画面。
+    /// </summary>
+    public string PreviewCaption
     {
         get
         {
-            string ext = _cur >= 0 && _cur < _items.Count ? _items[_cur].Ext : "";
-            string size = ImageItem.FormatBytes(_bytes);
-            // 对开时组合尺寸（_imgW×_imgH）是两页合起来的宽，看不出单张多大，
-            // 所以把两页各自的尺寸都列出来。
-            string dim = _imgW <= 0 ? "" : _viewOwnedB is not null
-                ? $" · {_sizeA.W}×{_sizeA.H} ＋ {_sizeB.W}×{_sizeB.H}"
-                : $" · {_sizeA.W}×{_sizeA.H}";
-            return ext + " · " + size + dim;
+            if (_cur < 0 || _cur >= _items.Count)
+            {
+                return "";
+            }
+
+            string a = NameWithoutExt(_items[_cur].DisplayName);
+            if (_curB < 0 || _curB >= _items.Count)
+            {
+                return a;
+            }
+
+            return a + "  ＋  " + NameWithoutExt(_items[_curB].DisplayName);
         }
+    }
+
+    /// <summary>
+    /// 去掉最后一段副档名。只认「最后一个点且在名字中间」：
+    /// <c>.gitignore</c> 这种以点开头的整体是名字，不能切。
+    /// </summary>
+    private static string NameWithoutExt(string name)
+    {
+        int dot = name.LastIndexOf('.');
+        return dot > 0 ? name[..dot] : name;
     }
 
     // ==================================================================
@@ -1202,8 +1222,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void RefreshImageInfo()
     {
         OnPropertyChanged(nameof(CurName));
+        OnPropertyChanged(nameof(PreviewCaption));
         OnPropertyChanged(nameof(ZoomText));
-        OnPropertyChanged(nameof(InfoLine));
         OnPropertyChanged(nameof(EmptyVisibility));
         OnPropertyChanged(nameof(ListEmptyVisibility));
         OnPropertyChanged(nameof(HasImageView));
@@ -2669,6 +2689,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void LoadPage(int idx, bool isB, long token)
     {
         string path = _items[idx].Path;
+
+        // 只记左页：右页是同一批图，记两遍只是把日志撑大
+        if (!isB)
+        {
+            Diag.Mark("decode: " + path);
+        }
+
         DecodedImage? hit = _previews.Get(path);
         Perf.Tick("查缓存");
 
@@ -3750,6 +3777,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async void ActGallery(object sender, RoutedEventArgs e)
     {
+        Diag.Mark("act:gallery");
         string root = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
         if (!Directory.Exists(root))
         {
@@ -3763,6 +3791,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void ActFiles(object sender, RoutedEventArgs e)
     {
+        Diag.Mark("act:files → 弹对话框");
         Microsoft.Win32.OpenFileDialog dlg = new()
         {
             Title = "选择图片",
@@ -3778,6 +3807,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         List<ImageItem> picked = dlg.FileNames.Select(p => new ImageItem(p)).ToList();
+        Diag.Mark($"act:files ← {picked.Count} 个文件");
         _userLoaded = true;
 
         // 「选择的文件」是挑出来的一批，目录不代表这批照片 → kind 记 files，
@@ -3795,8 +3825,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void ActFolder(object sender, RoutedEventArgs e)
     {
-        // 标题即提示语：原先是 Description + UseDescriptionForTitle = true，落在窗口标题栏上
+        // 标题即提示语：原先是 Description + UseDescriptionForTitle = true，落在窗口标题栏上。
+        // 换机器分发时最常出事的就是这一步（对话框 / 自解压 / 权限），所以前后都打点留痕
+        Diag.Mark("act:folder → 弹对话框");
         string? dir = NativeWin32.PickFolder(this, "选择要浏览的图片文件夹（含子文件夹）");
+        Diag.Mark(dir is null ? "act:folder ← 取消/失败" : "act:folder ← " + dir);
+
         if (dir is null)
         {
             Status = "已取消选择";
@@ -3816,6 +3850,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         _userLoaded = true; // 用户主动开目录：启动时的自动恢复要让路
         MarkUserBusy();     // 换目录的当口：后台的容量求和先让路
+        Diag.Mark($"scan:begin {root}（{(recursive ? "递归" : "单层")}）");
         BrowseDir = recursive ? null : root; // null ⇒ 左侧不显示 .. 与子文件夹
         long seq = ++_navSeq;
 
@@ -3827,6 +3862,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Status = "正在扫描文件夹…";
 
         ScanResult scan = prefetched ?? await Task.Run(() => ScanFolder(root, recursive));
+        Diag.Mark($"scan:done {scan.Images.Count} 张（其他 {scan.Others.Count}）");
 
         if (seq != _navSeq)
         {
@@ -5175,6 +5211,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         AutoFitListColumns(namesChanged: true);
 
         OnPropertyChanged(nameof(CurName));
+        OnPropertyChanged(nameof(PreviewCaption));
     }
 
     private void ApplyOptions()

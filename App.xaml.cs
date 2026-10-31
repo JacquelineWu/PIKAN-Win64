@@ -10,8 +10,30 @@ namespace PIKAN;
 
 public partial class App : Application
 {
+    /// <summary>
+    /// 上次是异常退出 → 这一次以「安全模式」起：只走 CPU，不碰 GPU / CUDA / D3D 互操作。
+    /// 换机器后绝大多数闪退都在这些 native 环节上，安全模式至少保证能先看得成图。
+    /// 只生效一次：这一轮正常收尾就会把标记清掉（见 <see cref="Report"/> 与 OnExit）。
+    /// </summary>
+    public static bool SafeMode { get; private set; }
+
     protected override void OnStartup(StartupEventArgs e)
     {
+        Diag.Start(e.Args);
+        Diag.Mark("startup");
+
+        // 上次崩过 → 这次避走 GPU 路径
+        AppState boot = AppState.Load();
+        if (boot.SafeNext)
+        {
+            SafeMode = true;
+            GpuResampler.Enabled = false;
+            GpuAccel.D3dEnabled = false;
+            boot.SafeNext = false;
+            boot.Save();
+            Diag.Mark("safemode：上次异常退出 → 本次关闭 GPU / D3D");
+        }
+
         // 未处理异常一律不再「静默闪退」：写 crash.log + 弹窗，至少让用户看到原因。
         // 单文件版若卡在运行时自解压阶段，进程会在托管代码之前就退出，那种情况看不到弹窗，
         // 但凡是进了 App 的异常都逃不掉这里。
@@ -26,6 +48,7 @@ public partial class App : Application
         bool zoomtest = false;
         bool sorttest = false;
         bool optselftest = false;
+        bool diagOnly = false;
         foreach (string a in e.Args)
         {
             if (string.Equals(a, "--nogpu", StringComparison.OrdinalIgnoreCase))
@@ -42,6 +65,11 @@ public partial class App : Application
                 // A/B 对照用：关掉显存常驻 + 结果缓存，回到「每次都上传重算」的旧路径
                 GpuImageCache.Enabled = false;
                 GpuResampler.ResultCacheEnabled = false;
+            }
+            else if (string.Equals(a, "--diag", StringComparison.OrdinalIgnoreCase))
+            {
+                // 换机器排查用：把环境快照与运行轨迹的位置直接报出来（不启动窗口）
+                diagOnly = true;
             }
             else if (a.StartsWith("--vram=", StringComparison.OrdinalIgnoreCase))
             {
@@ -123,6 +151,20 @@ public partial class App : Application
             }
         }
 
+        if (diagOnly)
+        {
+            // 不建窗口：只把环境与轨迹的位置报出来，方便把日志发给开发者
+            Diag.Mark("diag 模式");
+            System.Windows.MessageBox.Show(
+                "环境快照与运行轨迹已写入：\n\n" + Diag.TracePath +
+                "\n\n把这个文件发给开发者即可定位问题（不需要截图）。",
+                "PIKAN 诊断",
+                System.Windows.MessageBoxButton.OK,
+                System.Windows.MessageBoxImage.Information);
+            Shutdown();
+            return;
+        }
+
         if (cmp)
         {
             GpuAccel.WriteLog("cmp: " + CpuResampler.SelfTest(openPath));
@@ -145,6 +187,7 @@ public partial class App : Application
         }
 
         MainWindow window = new();
+        Diag.Mark("window created");
         window.Show();
 
         // 防止窗口被别的窗口盖住 / 起在后台，看起来像"双击没反应"
@@ -166,6 +209,12 @@ public partial class App : Application
         }
     }
 
+    protected override void OnExit(ExitEventArgs e)
+    {
+        Diag.Mark("exit");
+        base.OnExit(e);
+    }
+
     private static void Report(Exception? ex)
     {
         if (ex is null)
@@ -173,7 +222,9 @@ public partial class App : Application
             return;
         }
 
-        string text = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}\n{ex}\n\n";
+        Diag.Mark("★ 异常：" + ex.GetType().Name + " " + ex.Message);
+
+        string text = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}\n{ex}\n\n---- 死前轨迹 ----\n{Diag.Tail()}\n\n";
 
         try
         {
@@ -188,11 +239,25 @@ public partial class App : Application
             // 日志写不了也不能二次崩
         }
 
+        // 记一笔：下次启动走安全模式，别在同一处再崩一次
+        try
+        {
+            AppState st = AppState.Load();
+            st.SafeNext = true;
+            st.Save();
+        }
+        catch
+        {
+            // 同上
+        }
+
         try
         {
             System.Windows.MessageBox.Show(
                 "PIKAN 遇到问题：\n\n" + ex.Message +
-                "\n\n详细堆栈已写入 %LOCALAPPDATA%\\PIKAN\\crash.log",
+                "\n\n已记下详细堆栈：%LOCALAPPDATA%\\PIKAN\\crash.log\n" +
+                "运行轨迹：%LOCALAPPDATA%\\PIKAN\\trace.log\n\n" +
+                "下次启动会自动改用安全模式（纯 CPU，不碰显卡）。",
                 "PIKAN",
                 System.Windows.MessageBoxButton.OK,
                 System.Windows.MessageBoxImage.Error);

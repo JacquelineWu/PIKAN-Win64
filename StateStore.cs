@@ -59,6 +59,12 @@ public sealed class AppState
     /// <summary>用户在「选项」里勾选的看图策略（五项，默认全开）。</summary>
     public AppOptions Options { get; set; } = new();
 
+    /// <summary>
+    /// 上一次是异常退出 → 下次启动进安全模式（关 GPU / CUDA / D3D，只走 CPU）。
+    /// 只在崩过之后为真；启动消费掉它时立刻清回 false，所以只影响紧接着的那一次启动。
+    /// </summary>
+    public bool SafeNext { get; set; }
+
     private static string FilePath
     {
         get

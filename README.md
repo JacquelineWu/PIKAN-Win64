@@ -336,16 +336,46 @@ trimmer 看不见这次反射，把构造函数裁掉了，`MainWindow.Initializ
    下写不进去——先看安全软件有没有拦，再手工删掉这个目录重开一次。
    换成 `portable\` 多文件版可以彻底绕开这条路径（它不做自解压）。
 
-2. **看崩溃日志**：`%LOCALAPPDATA%\PIKAN\crash.log`。凡是进入 `App` 之后的未处理异常
-   都会写这里并弹窗，不会"静默闪退"。
+   注意：**单文件版运行时确实要把 5 个 WPF native 库解压到 `%TEMP%\.net\PIKAN\<hash>\`**
+   （`wpfgfx_cor3.dll`、`PresentationNative_cor3.dll`、`D3DCompiler_47_cor3.dll`、
+   `PenImc_cor3.dll`、`vcruntime140_cor3.dll`——这是 .NET 单文件打包的固有行为，
+   曾以为 .NET 10 不再落地，实测仍然落地）。而且它是**分批惰性加载**的：
+   窗口能出来不代表这些库全加载完了——`D3DCompiler` 要等真正渲染、`PenImc` 要等触摸/笔输入。
+   所以「打开没问题、选完文件夹一渲染就闪退」完全可能是这个目录里的 dll
+   被安全软件删掉 / 锁住导致的（典型报错就是 Windows 的
+   「**无法存取指定的装置、路径或档案。您可能没有适当的权限**」，即拒绝存取）。
+   处理：把 PIKAN.exe 加入安全软件白名单（或关闭「受控文件夹访问」），删掉
+   `%TEMP%\.net\PIKAN` 让它重新解压；或者干脆改用便携目录版。
 
-3. **看 Windows 事件日志**：应用程序日志里的 `.NET Runtime` / `Application Error`，
+2. **看运行轨迹与崩溃日志**：`%LOCALAPPDATA%\PIKAN\trace.log` 与 `crash.log`。
+   trace.log 每次启动先记一段**环境快照**（exe 在哪种盘、有没有带网络下载标记、
+   自解压目录里还剩几个 dll、受控文件夹访问开没开），之后在选文件夹、扫描、解码每个
+   关键节点打一行点——哪怕进程在 native 层直接没了（托管异常一个都抓不到的那种），
+   最后一行也能说明死在哪一步。把这两个文件发给开发者即可，不用截图。
+   只想要环境快照可以跑 `PIKAN.exe --diag`（不打开窗口，弹一个框告诉你日志在哪）。
+
+3. **弹过「PIKAN 遇到问题」之后**：程序会自动记下「崩过一次」，**下一次启动走安全模式**
+   （纯 CPU，不碰显卡 / CUDA / D3D 互操作），状态栏会说明；这一轮正常收尾，再下次就恢复 GPU。
+   如果安全模式能跑、正常模式崩，问题基本可以锁定在 GPU 链路，可长期用 `--nogpu` 快捷方式。
+
+4. **「选择文件夹」对话框起不来**：新式对话框（IFileDialog）起不来时程序会自动退到
+   老式 `SHBrowseForFolder` 对话框再试一次，两条路都有留痕（trace.log）。
+
+5. **看 Windows 事件日志**：应用程序日志里的 `.NET Runtime` / `Application Error`，
    以及 GPU 相关的看 `%LOCALAPPDATA%\PIKAN\gpu.log`。
 
-4. **低完整性进程**：如果 exe 落在整棵树都带
+6. **低完整性进程**：如果 exe 落在整棵树都带
    `Mandatory Label\Low Mandatory Level` 的目录里（某些受管控的工作目录、沙箱工作区），
    启动后进程会被降级，表现为写不了注册表也写不了临时目录——症状和上一条一模一样。
    `Publish.ps1` 出包时会自动把标签拉回 Medium。
+
+给朋友分发时的检查单（对应 trace.log 里的环境快照）：
+
+- exe 拷到**本地磁盘**再运行，别直接在 U 盘 / 网络盘 / OneDrive「按需下载」的占位文件上跑；
+- 右键 exe → 属性 → 勾 **解除锁定**（有「来自互联网」标记时）；
+- 安全软件拦截 / 报「无法存取指定的装置、路径或档案」→ 加白名单，
+  或关闭「受控文件夹访问」；删 `%TEMP%\.net\PIKAN` 重新解压；
+- 还不行就跑 `PIKAN.exe --diag`，把 `%LOCALAPPDATA%\PIKAN\trace.log` 发回来。
 
 程序侧已加固：未处理异常会弹窗提示并写入
 `%LOCALAPPDATA%\PIKAN\crash.log`，不会再"静默闪退"；CUDA 探测也挪到了后台线程，

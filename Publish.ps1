@@ -5,9 +5,11 @@
 #   单文件  release-portable\PIKAN.exe
 #                            一个文件走天下。体积靠 EnableCompressionInSingleFile 压掉一大半
 #                            （156 MB 的多文件目录 → 约 45 MB 的单个 exe）。
-#                            早年放弃单文件是因为它要把 WPF 的 native 组件自解压到 %TEMP%，
-#                            被安全软件拦住就是「双击毫无反应」；实测 .NET 10 已经不再落地
-#                            那个解压目录（直接从 bundle 里加载），这条路重新可用了。
+#                            注意：单文件版运行时仍要把 5 个 WPF native 库自解压到
+#                            %TEMP%\.net\PIKAN\<hash>\（.NET 单文件的固有行为），且分批惰性
+#                            加载——被安全软件清掉/拦掉的表现是「用着用着闪退」。
+#                            排查见 README「双击后毫无反应 / 闪退怎么办」；-Portable 形态
+#                            不做自解压，是分发遇到问题时的兜底。
 #
 #   便携目录 portable\       多文件目录。-Portable 切过来，调试 / 出现问题时对照用。
 #

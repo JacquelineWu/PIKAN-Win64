@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows;
 using System.Windows.Interop;
 
@@ -199,6 +200,13 @@ public static class NativeWin32
         [PreserveSig] int Compare(IntPtr other, uint hint, out int order);
     }
 
+    private enum PickResult
+    {
+        Cancelled = 0,
+        Ok = 1,
+        Failed = -1  // 对话框根本起不来（COM 被拦 / 组件缺失），不是用户点了取消
+    }
+
     /// <summary>
     /// 弹出文件夹选择对话框，返回选中路径；取消或失败返回 null。
     ///
@@ -206,8 +214,31 @@ public static class NativeWin32
     ///   · 把宿主窗口句柄传进去，对话框才会正确锚定到调用它的那个窗口上；
     ///   · 原先传的是 Description + UseDescriptionForTitle = true，落在窗口标题栏上，
     ///     这里直接 SetTitle，效果一致。
+    ///
+    /// ★ 新式对话框（IFileDialog）起不来时，自动退到老式 SHBrowseForFolder 再试一次：
+    ///   换机器分发时这是唯一还能保住「选文件夹」这一条路的兜底，
+    ///   老式对话框不依赖那一整套新式 Shell 组件。
     /// </summary>
     public static string? PickFolder(Window owner, string title)
+    {
+        (PickResult r, string? path) = PickFolderModern(owner, title);
+        if (r == PickResult.Ok)
+        {
+            return path;
+        }
+
+        if (r == PickResult.Cancelled)
+        {
+            return null;
+        }
+
+        Diag.Mark("pickfolder：新式对话框起不来 → 退到老式对话框");
+        (PickResult r2, string? path2) = PickFolderLegacy(owner, title);
+        Diag.Mark(r2 == PickResult.Ok ? "pickfolder：老式对话框 OK" : "pickfolder：老式对话框也没成");
+        return r2 == PickResult.Ok ? path2 : null;
+    }
+
+    private static (PickResult, string?) PickFolderModern(Window owner, string title)
     {
         IntPtr dlgPtr = IntPtr.Zero;
         object? dlgObj = null;
@@ -223,13 +254,13 @@ public static class NativeWin32
             int hr = CoCreateInstance(ref clsid, IntPtr.Zero, ClsctxInprocServer, ref iid, out dlgPtr);
             if (hr < 0 || dlgPtr == IntPtr.Zero)
             {
-                return null;
+                return (PickResult.Failed, null);
             }
 
             dlgObj = Marshal.GetObjectForIUnknown(dlgPtr);
             if (dlgObj is not IFileDialog dialog)
             {
-                return null;
+                return (PickResult.Failed, null);
             }
 
             dialog.SetOptions(FosPickFolders | FosForceFileSystem | FosPathMustExist);
@@ -238,17 +269,18 @@ public static class NativeWin32
             hr = dialog.Show(hwnd);
             if (hr < 0)
             {
-                return null; // 用户点了取消
+                return (PickResult.Cancelled, null); // 用户点了取消
             }
 
             if (dialog.GetResult(out IntPtr itemPtr) < 0 || itemPtr == IntPtr.Zero)
             {
-                return null;
+                return (PickResult.Failed, null);
             }
 
             try
             {
-                return PathOfShellItem(itemPtr);
+                string? p = PathOfShellItem(itemPtr);
+                return p is null ? (PickResult.Failed, null) : (PickResult.Ok, p);
             }
             finally
             {
@@ -257,8 +289,8 @@ public static class NativeWin32
         }
         catch
         {
-            // 对话框起不来（COM 被组策略禁用等极端情况）也不能让看图器崩，按取消处理
-            return null;
+            // 对话框起不来（COM 被组策略禁用等极端情况）也不能让看图器崩
+            return (PickResult.Failed, null);
         }
         finally
         {
@@ -271,6 +303,89 @@ public static class NativeWin32
             {
                 Marshal.Release(dlgPtr);
             }
+        }
+    }
+
+    // ===============================================================
+    // ③b 老式文件夹对话框（SHBrowseForFolder）：新式对话框起不来时的兜底
+    // ===============================================================
+
+    private const uint BifReturnOnlyFsDirs = 0x0001;   // 只给真实目录
+    private const uint BifEditBox = 0x0010;             // 允许直接手输路径
+    private const uint BifNewDialogStyle = 0x0040;      // 带「新建文件夹」的新外观
+    private const uint BifNoNewFolderButton = 0x0200;   // 不给新建按钮（看图器不需要）
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct BrowseInfo
+    {
+        public IntPtr HwndOwner;
+        public IntPtr PidlRoot;
+        public IntPtr DisplayName;   // 回传的显示名缓冲区
+        public string Title;
+        public uint Flags;
+        public IntPtr Callback;
+        public IntPtr LParam;
+        public int Image;
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr SHBrowseForFolder(ref BrowseInfo bi);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool SHGetPathFromIDList(IntPtr pidl, StringBuilder path);
+
+    /// <summary>
+    /// 老式对话框：XP 时代的那棵树 + 一个可手输的路径框。外观旧，但它不依赖新式 Shell 组件，
+    /// 在「IFileDialog 起不来」的机器上往往还能用——分发给别人时它值这个「万一」。
+    /// </summary>
+    private static (PickResult, string?) PickFolderLegacy(Window owner, string title)
+    {
+        // SHBrowseForFolder 要求调用线程已初始化 COM（WPF 的 UI 线程本来就是 STA，已初始化）
+        BrowseInfo bi = new()
+        {
+            HwndOwner = new WindowInteropHelper(owner).Handle,
+            Title = title,
+            Flags = BifReturnOnlyFsDirs | BifEditBox | BifNewDialogStyle | BifNoNewFolderButton,
+            DisplayName = Marshal.AllocCoTaskMem(520)
+        };
+
+        IntPtr pidl;
+        try
+        {
+            pidl = SHBrowseForFolder(ref bi);
+        }
+        catch
+        {
+            return (PickResult.Failed, null);
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(bi.DisplayName);
+        }
+
+        if (pidl == IntPtr.Zero)
+        {
+            return (PickResult.Cancelled, null); // 取消
+        }
+
+        try
+        {
+            StringBuilder sb = new(520);
+            if (!SHGetPathFromIDList(pidl, sb))
+            {
+                return (PickResult.Failed, null);
+            }
+
+            string path = sb.ToString();
+            return path.Length == 0 ? (PickResult.Failed, null) : (PickResult.Ok, path);
+        }
+        catch
+        {
+            return (PickResult.Failed, null);
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(pidl); // 这个 pidl 由 shell 用 CoTaskMemAlloc 分配
         }
     }
 

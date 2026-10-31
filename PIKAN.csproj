@@ -46,9 +46,12 @@
 
     曾经放弃过单文件：那时的实现要把 WPF 的 native 组件自解压到 %TEMP%，
     被安全软件或目录权限一拦就是「双击毫无反应」的静默退出（本机复现过 Error code: 5）。
-    .NET 10 重测已不成立：SingleFile 的 native 库直接从 bundle 里加载，
-    跑完之后 %TEMP%/.net/ 下没有生成任何提取目录，bench（58 张图 + GPU 重采样）照常跑完。
-    所以现在单文件是首选形态，便携目录退居调试/兜底。
+    ★ 曾以为 .NET 10 不再落地解压目录，实测**仍然落地**：%TEMP%\.net\PIKAN\<hash>\ 下
+    会有 wpfgfx / PresentationNative / D3DCompiler / PenImc / vcruntime140 五个 dll，
+    而且是分批惰性加载（D3DCompiler 等真正渲染才载、PenImc 等触摸输入才载）——
+    所以「窗口出得来、用着用着闪退」也可能是这个目录被安全软件清掉导致的。
+    诊断与应对见 README「双击后毫无反应 / 闪退怎么办」一节（trace.log 会把解压目录
+    里还剩几个 dll 记下来）；便携目录形态不做自解压，是彻底绕开这条路的兜底。
 
     ★ 别再试 PublishTrimmed 了（2026-10-30 实测，两次都失败）：
       1. SDK 硬拦：UseWindowsForms → NETSDK1175；即便关掉 WinForms，UseWPF → NETSDK1168。
