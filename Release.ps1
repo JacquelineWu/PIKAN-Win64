@@ -5,18 +5,18 @@
 # 一次招呼的顺序很重要，踩过坑的地方都在注释里标了「为什么」。
 #
 # 用法（PowerShell 7）：
-#   pwsh .\Release.ps1 -Tag v1.0.2
-#   pwsh .\Release.ps1 -Tag v1.0.2 -DryRun        # 只把计划打印出来，一个字节都不动
-#   pwsh .\Release.ps1 -Tag v1.0.2 -SkipPublish   # 复用已有的 release-portable\PIKAN.exe
-#   pwsh .\Release.ps1 -Tag v1.0.2 -Force -Yes    # 覆盖已存在的同名 tag / Release / 附件
-#   pwsh .\Release.ps1 -Tag v1.0.2 -Draft         # 发成草稿（GitHub；Gitee 无草稿概念，仅不发改名通知）
-#   pwsh .\Release.ps1 -Tag v1.0.2 -SkipGitee     # 只发 GitHub
+#   pwsh .\Release.ps1 -Tag v1.0.3
+#   pwsh .\Release.ps1 -Tag v1.0.3 -DryRun        # 只把计划打印出来，一个字节都不动
+#   pwsh .\Release.ps1 -Tag v1.0.3 -SkipPublish   # 复用已有的 release-portable\PIKAN.exe
+#   pwsh .\Release.ps1 -Tag v1.0.3 -Force -Yes    # 覆盖已存在的同名 tag / Release / 附件
+#   pwsh .\Release.ps1 -Tag v1.0.3 -Draft         # 发成草稿（GitHub；Gitee 无草稿概念，仅不发改名通知）
+#   pwsh .\Release.ps1 -Tag v1.0.3 -SkipGitee     # 只发 GitHub
 #
 # ★ 默认分两步走（2026-10-31 定的规矩）：代码和 tag 可以先推，
 #   **两站的发行版要等确认过再建**——一旦建了就公开可下载，撤不回来。
-#     ① pwsh .\Release.ps1 -Tag v1.0.2 -SkipRelease
+#     ① pwsh .\Release.ps1 -Tag v1.0.3 -SkipRelease
 #        编译 → 发布 → 签名 → 算哈希 → 推 tag 到两站。**不建任何发行版、不传附件。**
-#     ② pwsh .\Release.ps1 -Tag v1.0.2 -SkipPublish -SkipTag
+#     ② pwsh .\Release.ps1 -Tag v1.0.3 -SkipPublish -SkipTag
 #        确认要发之后，只做建发行版 + 传附件 + 回下载校验（exe 与 tag 都是现成的）。
 #   -SkipRelease 与 -SkipTag 只是把各自那一段跳过，其余步骤照跑，两个一起给就是「什么都不动」。
 #

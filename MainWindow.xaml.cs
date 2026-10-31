@@ -253,11 +253,22 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private bool _listCollapsed;
 
     /// <summary>
-    /// 收起后左栏的宽度。
+    /// 收起后左栏的宽度——这是**下限**，也是刚收起、还没量出内容时的默认值。
     /// 别再压了：面板 168 → 列表实测 156 → 扣掉滚动条余量后档案名列约 134，
     /// 再减去行内边距，一行能露出一截中文文件名；再窄就只剩省略号，等于没有信息。
+    /// 名字更长的目录会按内容往上加，一直加到 <see cref="ListCollapsedMaxWidth"/> 为止。
     /// </summary>
     private const double ListCollapsedWidth = 168;
+
+    /// <summary>
+    /// 收起态的上限。定得比展开态（<see cref="ListMinWidth"/>~<see cref="ListMaxWidth"/>）明显低一截，
+    /// 是为了保住「收起 = 省地方」这件事本身：再怎么样，收起来的一条窄条也不该宽到跟展开差不多。
+    /// 超过这个宽度就照旧挂省略号——名字特别长的目录毕竟是少数。
+    /// </summary>
+    private const double ListCollapsedMaxWidth = 360;
+
+    /// <summary>收起态当前的宽度，由内容定（<see cref="FitPanelWidthToContent"/>），不进状态文件。</summary>
+    private double _listCollapsedWidth = ListCollapsedWidth;
 
     /// <summary>唤出热区：鼠标要压到**屏幕**顶端这段距离（物理像素）内，顶栏才浮出。
     /// 10 px 意味着得把鼠标推到显示器最上边那条线上，平时完全看不到工具条。</summary>
@@ -609,7 +620,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// </summary>
     public GridLength ListColumnWidth
     {
-        get => new(_fullscreen ? 0 : (_listCollapsed ? ListCollapsedWidth : _listWidth), GridUnitType.Pixel);
+        get => new(_fullscreen ? 0 : (_listCollapsed ? _listCollapsedWidth : _listWidth), GridUnitType.Pixel);
         set
         {
             // 全屏时这一列被压成 0，TwoWay 绑定会把这个 0 回写进来。
@@ -623,11 +634,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (_listCollapsed)
             {
                 // 收起态下这里会收到两种写入，得区分开：
-                //   ① 自己 OnPropertyChanged 引发的回显——值恰好等于 ListCollapsedWidth，忽略。
-                //   ② 用户拖了分隔条——值不等于 ListCollapsedWidth。这就是「拖一下自动展开」：
+                //   ① 自己 OnPropertyChanged 引发的回显——值恰好等于当前收起宽度，忽略。
+                //      收起宽度会随内容变（见 FitPanelWidthToContent），所以要跟 _listCollapsedWidth 比，
+                //      不能跟常量 ListCollapsedWidth 比——否则内容把收起条撑宽之后，
+                //      每一次回显都会被误判成「用户在拖」，收起态自己就展开了。
+                //   ② 用户拖了分隔条——值不等于当前收起宽度。这就是「拖一下自动展开」：
                 //      退出收起态，再让这次拖动走下面的正常流程。
                 //      好处是拖动永远有反馈，不会出现「拖了没反应」或「拖完宽度被夹回去」。
-                if (Math.Abs(value.Value - ListCollapsedWidth) < 0.5)
+                if (Math.Abs(value.Value - _listCollapsedWidth) < 0.5)
                 {
                     return;
                 }
@@ -819,11 +833,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     ///      否则用户刚把分隔条拖宽，下一次 SizeChanged 就把它弹回内容宽度了。
     ///   ② **收窄要有滞回**。补测字节数那几批是分批来的，没有滞回的话
     ///      每批都可能让左栏抖一下。
+    ///
+    /// 收起态也走这里：同样按最长名字伸缩，只是上下限换成收起态那一套
+    /// （<see cref="ListCollapsedWidth"/> ~ <see cref="ListCollapsedMaxWidth"/>）。
+    /// 收起时那两列是 0、列间距也是 0，所以装下同一个名字需要的面板宽要小得多，
+    /// 收起来的那条窄条因此能一直保持「明显窄于展开」。
     /// </summary>
     private void FitPanelWidthToContent()
     {
-        // 全屏把左栏压成 0、收起压到 ListCollapsedWidth，这两种形态都不该被内容撑开
-        if (_fullscreen || _listCollapsed || _entries.Count == 0 || _nameColNeed <= 0)
+        // 全屏把左栏压成 0，那是另一种形态，不该被内容撑开
+        if (_fullscreen || _entries.Count == 0 || _nameColNeed <= 0)
         {
             return;
         }
@@ -833,9 +852,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         // 列宽已经改了但布局还没重排，ActualWidth 还是收起态那个值，反推出来会离谱。
         double chrome = FileList.Margin.Left + FileList.Margin.Right;
 
-        // 与 NameColWidth 的公式严格互逆：面板宽这么大时，档案名列正好等于 _nameColNeed
-        double want = _nameColNeed + SizeColWidth + DateColWidth + (ColGap * 3) + ScrollReserve + chrome;
-        double delta = want - _listWidth;
+        // 与 NameColWidth 的公式严格互逆：面板宽这么大时，档案名列正好等于 _nameColNeed。
+        // 收起态那两列 getter 已经是 0，间距也照 NameColWidth 那样一分不扣。
+        double gaps = _listCollapsed ? 0 : ColGap * 3;
+        double want = _nameColNeed + SizeColWidth + DateColWidth + gaps + ScrollReserve + chrome;
+
+        double cur = _listCollapsed ? _listCollapsedWidth : _listWidth;
+        double delta = want - cur;
 
         // 加宽立刻跟（名字被截断是看得见的毛病），收窄要有明显富余才动
         if (delta < 0.5 && delta > -FitShrinkSlack)
@@ -843,22 +866,38 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-
-        // 上限：左栏自己的硬上限，以及「预览区至少留 MinPreviewWidth」
-        double maxW = ListMaxWidth;
+        // 上限：这一形态自己的硬上限，以及「预览区至少留 MinPreviewWidth」
+        double minW = _listCollapsed ? ListCollapsedWidth : ListMinWidth;
+        double maxW = _listCollapsed ? ListCollapsedMaxWidth : ListMaxWidth;
         if (ActualWidth > MinPreviewWidth * 2)
         {
-            maxW = Math.Min(ListMaxWidth, ActualWidth - MinPreviewWidth);
+            maxW = Math.Min(maxW, ActualWidth - MinPreviewWidth);
         }
 
-        want = Math.Clamp(want, ListMinWidth, maxW);
-        if (Math.Abs(want - _listWidth) < 0.5)
+        // 窗口窄到一定程度时上下限会打架，Math.Clamp 在 min>max 时返回 min，
+        // 等于把上限整个吞掉——先把下限压下来，宁可窄一点也不越过硬上限。
+        if (maxW < minW)
+        {
+            minW = maxW;
+        }
+
+        want = Math.Clamp(want, minW, maxW);
+        if (Math.Abs(want - cur) < 0.5)
         {
             return;
         }
 
-        _listWidth = want;
+        if (_listCollapsed)
+        {
+            _listCollapsedWidth = want;
+        }
+        else
+        {
+            _listWidth = want;
+        }
+
         OnPropertyChanged(nameof(ListColumnWidth));
+        OnPropertyChanged(nameof(NameColWidth));
     }
 
     private static double Measure(string s, Typeface face, double dpi, double size = ColFont) =>
@@ -900,11 +939,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         OnPropertyChanged(nameof(ListCollapseGlyph));
         OnPropertyChanged(nameof(ListCollapseTip));
 
-        // 收起期间内容换过（名字量好了但没应用），展开时补一次，宽度立刻跟上
-        if (!_listCollapsed)
-        {
-            AutoFitListColumns();
-        }
+        // 两种形态的宽度是各算各的（收起态上下限更低），所以切换后都得重定一次：
+        //   展开 ← 补上收起期间可能换过的目录内容，宽度立刻跟上
+        //   收起 ← 按收起态的上下限重算，长名字的目录会把窄条撑到 ListCollapsedMaxWidth
+        AutoFitListColumns();
 
         Status = _listCollapsed ? "已收起档案列表" : "已展开档案列表";
     }
