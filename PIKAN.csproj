@@ -15,8 +15,8 @@
     <UseWindowsForms>false</UseWindowsForms>
     <AssemblyName>PIKAN</AssemblyName>
     <RootNamespace>PIKAN</RootNamespace>
-    <Version>1.0.1</Version>
-    <FileVersion>1.0.1</FileVersion>
+    <Version>1.0.2</Version>
+    <FileVersion>1.0.2</FileVersion>
     <Company>JacquelineWu (flyercat)</Company>
     <Product>PIKAN</Product>
     <Description>PIKAN Windows 版 - 原生 HEIC/JPG 看图软件（ACDSee 风格）</Description>

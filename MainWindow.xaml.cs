@@ -209,17 +209,46 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>列表正文的字号，算列宽时要按同一个字号量。</summary>
     private const double ColFont = 11;
 
+    /// <summary>档案名列比另两列大一号（XAML 里是 12），量名字得按 12 量才准。</summary>
+    private const double NameFont = 12;
+
+    /// <summary>量出来的名字宽度上加的余量：留一点呼吸，免得最长的那行紧贴着省略号。</summary>
+    private const double NamePad = 6;
+
+    /// <summary>
+    /// 自动适应时**只精量最宽的这几行**。上千行逐个排字会明显卡一下，
+    /// 而按字符数挑又不准（10 个汉字比 20 个拉丁字母还宽），
+    /// 所以先用粗估算挑出最宽的一批，再对这批逐个精量。
+    /// </summary>
+    private const int FitCandidates = 32;
+
+    /// <summary>收窄的滞回：富余不到这么多就不动。
+    /// 没有它，补测字节数那几批每来一行新数据都可能让左栏抖一下。</summary>
+    private const double FitShrinkSlack = 24;
+
+    /// <summary>自动适应给预览区留的最小宽度：左栏再想宽也不能把预览区压过这条线。</summary>
+    private const double MinPreviewWidth = 420;
+
     private double _listWidth = ListDefaultWidth;
     private double _sizeColW = 62;
     private double _dateColW = 104;
     private bool _measuringCols;
+
+    /// <summary>最近一次量出的「档案名列所需宽度」。名字没变时直接复用，不必重排一遍字。</summary>
+    private double _nameColNeed;
+
+    /// <summary>名字这一批是不是变了（换目录、DPI 变化、乱码还原开关）。
+    /// 只有它为 true 才重新量名字；补测字节 / 日期那几批不动它。</summary>
+    private bool _nameFitDirty = true;
 
     /// <summary>
     /// 档案列表是否收起。
     ///
     /// 收起时左栏压到 ListCollapsedWidth（远低于 ListMinWidth）——那条下限是给「三列都要挤得下」
     /// 用的，收起态本来就只剩档案名一列，不该被它夹回去。
-    /// 重点是：**收起不改 _listWidth**。用户自己拖出来的展开宽度要原样留着，一点一键就能回来。
+    /// 重点是：**收起不改 _listWidth**，一路收到底也不会把展开宽度弄丢。
+    /// 反过来展开时会按内容重算一次（见 <see cref="AutoFitListColumns"/>）——
+    /// 内容优先是选定的策略，所以展开宽度最终由当前目录的内容定，不一定等于你上次拖的那个值。
     /// </summary>
     private bool _listCollapsed;
 
@@ -676,13 +705,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 按内容重新定「字节 / 日期」两列的宽度 —— 这就是"自动 resize"的那部分：
-    /// 数字一位位变长（999,999 → 1,000,000）或目录换了一批，列宽自己跟上。
+    /// 按内容重新定三列的宽度 —— 这就是"自动 resize"的那部分：
+    /// 数字一位位变长（999,999 → 1,000,000）或目录换了一批，列宽自己跟上；
+    /// 档案名列则由「最长那一行名字」定夺，左栏总宽跟着它伸缩（见 <see cref="FitPanelWidthToContent"/>）。
     ///
-    /// 只测**字符数最多**的那一行就够了：这两列全是数字和分隔符，字符最多的基本就是最宽的，
-    /// 没必要给上千行逐个排一次字。
+    /// 只测**字符数最多**的那一行就够了 —— 这对字节 / 日期两列成立：它们全是数字和分隔符，
+    /// 字符最多的基本就是最宽的。档案名不行（10 个汉字比 20 个拉丁字母还宽），
+    /// 走 <see cref="MeasureNameColumnNeed"/> 那套「粗估挑候选 + 精量」。
     /// </summary>
-    private void AutoFitListColumns()
+    /// <param name="namesChanged">这一批的名字是否变了（换目录 / 乱码还原开关 / DPI 变化）。
+    /// 补测字节与日期那几批不该重排名字，传 false 让量好的结果复用。</param>
+    private void AutoFitListColumns(bool namesChanged = false)
     {
         if (_measuringCols)
         {
@@ -710,11 +743,24 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             Typeface face = new(FontFamily, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
             double dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
 
+            if (namesChanged)
+            {
+                _nameFitDirty = true;
+            }
+
+            if (_nameFitDirty)
+            {
+                _nameColNeed = MeasureNameColumnNeed(dpi);
+                _nameFitDirty = false;
+            }
+
             SizeColWidth = Math.Clamp(Math.Ceiling(Measure(longestSize.Length == 0 ? "--" : longestSize, face, dpi)) + ColGap, 44, 150);
             DateColWidth = Math.Clamp(Math.Ceiling(Measure(longestDate.Length == 0 ? "2026-10-29 13:45" : longestDate, face, dpi)) + ColGap, 80, 160);
 
             // 宽度可能压根没变（ setter 会早退 ），但档案名列吃的是剩余宽度，得自己刷一次
             OnPropertyChanged(nameof(NameColWidth));
+
+            FitPanelWidthToContent();
         }
         finally
         {
@@ -722,9 +768,102 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
     }
 
-    private static double Measure(string s, Typeface face, double dpi) =>
+    /// <summary>
+    /// 量出「装下最长那一行档案名」需要多宽。
+    ///
+    /// 两步走是因为直接全量精量太慢：一个目录上千行，逐个排字要几十毫秒，
+    /// 而换目录时这个量算会跑不止一次。先按 <see cref="EstimateWidth"/> 粗估排个序，
+    /// 只对最宽的 <see cref="FitCandidates"/> 行做精量——宽度冠军必然落在这批里，
+    /// 粗估只需要能分出「汉字比拉丁字母宽」这个量级的差别就够了。
+    /// </summary>
+    private double MeasureNameColumnNeed(double dpi)
+    {
+        if (_entries.Count == 0)
+        {
+            return 0;
+        }
+
+        // 「..」与子文件夹是 SemiBold。按粗体量，常规体的行只会更窄，永远放得下。
+        Typeface bold = new(FontFamily, FontStyles.Normal, FontWeights.SemiBold, FontStretches.Normal);
+
+        double widest = 0;
+        foreach (FsEntry e in _entries.OrderByDescending(x => EstimateWidth(x.DisplayName)).Take(FitCandidates))
+        {
+            widest = Math.Max(widest, Measure(e.DisplayName, bold, dpi, NameFont));
+        }
+
+        return Math.Ceiling(widest) + NamePad;
+    }
+
+    /// <summary>粗估一行文字的相对宽度：CJK 与全角约一个字宽，其余约半个。
+    /// 只用于给候选排序，不求准。</summary>
+    private static double EstimateWidth(string s)
+    {
+        double w = 0;
+        foreach (char c in s)
+        {
+            w += c >= '\u2e80' ? 1.0 : 0.55;
+        }
+
+        return w;
+    }
+
+    /// <summary>
+    /// 把左栏总宽调成「刚好装下最长档案名」。
+    ///
+    /// 档案名列本身是剩余宽度（见 <see cref="NameColWidth"/>），想让它按内容走，
+    /// 只能反过来动左栏总宽：需要多宽就给多宽，多出来的退回给预览区。
+    ///
+    /// 两个必须守住的地方：
+    ///   ① **只在换内容时调**。窗口尺寸变化也会让列表变宽变窄，但不能跟着重算——
+    ///      否则用户刚把分隔条拖宽，下一次 SizeChanged 就把它弹回内容宽度了。
+    ///   ② **收窄要有滞回**。补测字节数那几批是分批来的，没有滞回的话
+    ///      每批都可能让左栏抖一下。
+    /// </summary>
+    private void FitPanelWidthToContent()
+    {
+        // 全屏把左栏压成 0、收起压到 ListCollapsedWidth，这两种形态都不该被内容撑开
+        if (_fullscreen || _listCollapsed || _entries.Count == 0 || _nameColNeed <= 0)
+        {
+            return;
+        }
+
+        // 面板比列表宽出来的那一截 = ListBox 的左右 Margin，直接问 Margin 要。
+        // 不能拿「_listWidth − FileList.ActualWidth」去反推：展开左栏的那一下，
+        // 列宽已经改了但布局还没重排，ActualWidth 还是收起态那个值，反推出来会离谱。
+        double chrome = FileList.Margin.Left + FileList.Margin.Right;
+
+        // 与 NameColWidth 的公式严格互逆：面板宽这么大时，档案名列正好等于 _nameColNeed
+        double want = _nameColNeed + SizeColWidth + DateColWidth + (ColGap * 3) + ScrollReserve + chrome;
+        double delta = want - _listWidth;
+
+        // 加宽立刻跟（名字被截断是看得见的毛病），收窄要有明显富余才动
+        if (delta < 0.5 && delta > -FitShrinkSlack)
+        {
+            return;
+        }
+
+
+        // 上限：左栏自己的硬上限，以及「预览区至少留 MinPreviewWidth」
+        double maxW = ListMaxWidth;
+        if (ActualWidth > MinPreviewWidth * 2)
+        {
+            maxW = Math.Min(ListMaxWidth, ActualWidth - MinPreviewWidth);
+        }
+
+        want = Math.Clamp(want, ListMinWidth, maxW);
+        if (Math.Abs(want - _listWidth) < 0.5)
+        {
+            return;
+        }
+
+        _listWidth = want;
+        OnPropertyChanged(nameof(ListColumnWidth));
+    }
+
+    private static double Measure(string s, Typeface face, double dpi, double size = ColFont) =>
         new FormattedText(s, CultureInfo.CurrentCulture, System.Windows.FlowDirection.LeftToRight,
-                          face, ColFont, System.Windows.Media.Brushes.White, dpi).Width;
+                          face, size, System.Windows.Media.Brushes.White, dpi).Width;
 
     /// <summary>面板宽度变了，档案名列要跟着吃掉/吐出这部分空间。</summary>
     private void FileList_SizeChanged(object sender, SizeChangedEventArgs e) =>
@@ -743,8 +882,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>
     /// 切换左栏的收起 / 展开（箭头按钮和 Ctrl+B 都走这里）。
     ///
-    /// 只改 _listCollapsed，**不动 _listWidth**——用户拖出来的展开宽度必须原样留着，
-    /// 否则收起再展开，左栏就永远回不到他自己调好的那个宽度了。
+    /// 收起只改 _listCollapsed，**不动 _listWidth**：拖出来的展开宽度要留着，
+    /// 否则收起再展开，左栏就回不到自己调好的那个宽度了。
+    /// 展开则不同——末尾会补一次 <see cref="AutoFitListColumns"/>，按当前目录的内容重定宽度
+    /// （收起期间换过目录的话，这一步就是让宽度跟上新内容的）。
     /// </summary>
     public void ToggleListCollapsed()
     {
@@ -758,6 +899,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         OnPropertyChanged(nameof(ListHeaderVisibility));
         OnPropertyChanged(nameof(ListCollapseGlyph));
         OnPropertyChanged(nameof(ListCollapseTip));
+
+        // 收起期间内容换过（名字量好了但没应用），展开时补一次，宽度立刻跟上
+        if (!_listCollapsed)
+        {
+            AutoFitListColumns();
+        }
 
         Status = _listCollapsed ? "已收起档案列表" : "已展开档案列表";
     }
@@ -1491,8 +1638,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             _entries.Add(row);
         }
 
-        // 换了一批行 → 字节数与日期的最长值可能变了，列宽重算一次
-        AutoFitListColumns();
+        // 换了一批行 → 名字、字节数与日期的最长值都变了，三列连同左栏总宽一起重算
+        AutoFitListColumns(namesChanged: true);
         OnPropertyChanged(nameof(CountLabel));
 
         // 行数变了要重判空态：目录里没图但有「..」/子文件夹时，不能再拿「还没有图片」盖住列表
@@ -4265,7 +4412,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void Window_DpiChanged(object sender, System.Windows.DpiChangedEventArgs e)
     {
         RefreshImageInfo();
-        AutoFitListColumns();
+        // DPI 一变，同样的字号排出来的宽度就不同了，名字也得重量
+        AutoFitListColumns(namesChanged: true);
         // 显式宽高按 DIP 存，DPI 一变同样的 DIP 对应的设备像素就不同了，必须重钉
         if (_viewOwned is not null)
         {
@@ -4485,6 +4633,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             e.RefreshDisplayName();
         }
+
+        // 还原后的中文名比原来那串乱码宽得多（也可能更窄），列宽必须重量一次
+        AutoFitListColumns(namesChanged: true);
 
         OnPropertyChanged(nameof(CurName));
     }

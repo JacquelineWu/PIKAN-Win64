@@ -5,12 +5,12 @@
 # 一次招呼的顺序很重要，踩过坑的地方都在注释里标了「为什么」。
 #
 # 用法（PowerShell 7）：
-#   pwsh .\Release.ps1 -Tag v1.0.1
-#   pwsh .\Release.ps1 -Tag v1.0.1 -DryRun        # 只把计划打印出来，一个字节都不动
-#   pwsh .\Release.ps1 -Tag v1.0.1 -SkipPublish   # 复用已有的 release-portable\PIKAN.exe
-#   pwsh .\Release.ps1 -Tag v1.0.1 -Force -Yes    # 覆盖已存在的同名 tag / Release / 附件
-#   pwsh .\Release.ps1 -Tag v1.0.1 -Draft         # 发成草稿（GitHub；Gitee 无草稿概念，仅不发改名通知）
-#   pwsh .\Release.ps1 -Tag v1.0.1 -SkipGitee     # 只发 GitHub
+#   pwsh .\Release.ps1 -Tag v1.0.2
+#   pwsh .\Release.ps1 -Tag v1.0.2 -DryRun        # 只把计划打印出来，一个字节都不动
+#   pwsh .\Release.ps1 -Tag v1.0.2 -SkipPublish   # 复用已有的 release-portable\PIKAN.exe
+#   pwsh .\Release.ps1 -Tag v1.0.2 -Force -Yes    # 覆盖已存在的同名 tag / Release / 附件
+#   pwsh .\Release.ps1 -Tag v1.0.2 -Draft         # 发成草稿（GitHub；Gitee 无草稿概念，仅不发改名通知）
+#   pwsh .\Release.ps1 -Tag v1.0.2 -SkipGitee     # 只发 GitHub
 #
 # Gitee 令牌的三种给法（优先级从高到低）：
 #   -GiteeToken (Read-Host -AsSecureString 提示也走这条路)
