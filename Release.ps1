@@ -441,10 +441,24 @@ else {
 
     $attachApi = "$api/releases/$($rel.id)/attach_files"
 
+    # ★★ 两个坑（2026-10-31 首发 v1.0.1 时踩到，都别改回去）★★
+    #
+    # ① 千万别写成 "$attachApi?access_token=$plain"：
+    #    PowerShell 7.1+ 有**空条件成员访问运算符** ?. ，
+    #    变量名后面紧跟一个 ? 会被优先解析成 $attachApi?.access_token ，
+    #    整个前缀求值成 $null，最后拼出来的 URI 是 "=0b75…"（只有 33 字符），
+    #    报 “Invalid URI: The hostname could not be parsed.”。
+    #    必须像下面这样用字符串拼接，或者写成 "${attachApi}?access_token=$plain"。
+    #   （"$api/releases?access_token=…" 没问题——变量名后面是 / ，不会被误解析。）
+    #
+    # ② 令牌要放在 **query** 上：放进 multipart 表单正文里 Gitee 会回 401，
+    #    哪怕这个令牌本身权限是够的（列发行版、建发行版都成功，只有上传 401）。
+    $tokenQuery = '?access_token=' + $plain
+
     # 附件名 → id，用于 -Force 时先删后传
     $existingAssets = @{}
     try {
-        $assets = Invoke-RestMethod -Uri "$attachApi?access_token=$plain" -Method Get -TimeoutSec 60
+        $assets = Invoke-RestMethod -Uri ($attachApi + $tokenQuery) -Method Get -TimeoutSec 60
         foreach ($a in $assets) { $existingAssets[$a.name] = $a.id }
     }
     catch { Warn "取附件列表失败：$($_.Exception.Message)" }
@@ -457,9 +471,7 @@ else {
             if (-not $Force) { Warn "附件 $($u.Name) 已存在，跳过上传（要替换加 -Force -Yes）"; continue }
             try {
                 Invoke-WebRequest -Method Delete -TimeoutSec 60 -UseBasicParsing `
-                    -Uri "$attachApi/$($existingAssets[$u.Name])" `
-                    -ContentType 'application/x-www-form-urlencoded' `
-                    -Body "access_token=$plain" | Out-Null
+                    -Uri ($attachApi + '/' + $existingAssets[$u.Name] + $tokenQuery) | Out-Null
                 Info "已删旧附件 $($u.Name)"
             }
             catch { Die "删除旧附件 $($u.Name) 失败：$($_.Exception.Message)" }
@@ -470,9 +482,8 @@ else {
         $sizeHint = [math]::Round((Get-Item -LiteralPath $u.Path).Length / 1MB, 1)
         Write-Host "  上传 $($u.Name)（$sizeHint MB，Gitee 慢，耐心等）..." -ForegroundColor DarkGray
         try {
-            Invoke-WebRequest -Uri "$attachApi" -Method Post -TimeoutSec 1800 -Form @{
-                access_token = $plain
-                file         = (Get-Item -LiteralPath $u.Path)
+            Invoke-WebRequest -Uri ($attachApi + $tokenQuery) -Method Post -TimeoutSec 1800 -Form @{
+                file = (Get-Item -LiteralPath $u.Path)
             } | Out-Null
         }
         catch { Die "上传 $($u.Name) 失败：$($_.Exception.Message)" }
