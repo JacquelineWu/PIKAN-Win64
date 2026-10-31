@@ -48,9 +48,11 @@
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
 
-                    <!-- 抬头：当前来源 + 张数（收起时连这行一起藏掉） -->
-                    <Grid Grid.Row="0" Margin="12,10,12,6"
-                          Visibility="{Binding ListHeaderVisibility}">
+                    <!-- 抬头：当前来源（目录名）+ 张数。
+                         收起左栏时照样留着：收起的意义是「列表只留档案名一列」，
+                         不是把「我在哪、怎么换目录」一起收掉——完整路径另有窗口标题栏，
+                         这里这行短名负责和排序 / 回上层 / 选择文件夹三个按钮凑成一抬头。 -->
+                    <Grid x:Name="ListHeaderRow" Grid.Row="0" Margin="12,10,12,6">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
@@ -67,14 +69,14 @@
                                    Foreground="#7f88a3" />
                     </Grid>
 
-                    <!-- 排序 / 回上层 / 选择文件夹（收起时藏掉：三个按钮要占一整行，
-                         留着就违背"只剩档案名"的初衷了）。
+                    <!-- 排序 / 回上层 / 选择文件夹（收起时也留着：收起只收掉大小 / 日期两列，
+                         换目录与排序这些操作没有别的入口）。
                          原先上面还有一行完整路径，现在搬到窗口标题栏去了（PIKAN 右边），
-                         左栏这一行就只放按钮。 -->
-                    <WrapPanel Grid.Row="1"
+                         左栏这一行就只放按钮。宽度不够时 WrapPanel 自动换行，不会挤没。 -->
+                    <WrapPanel x:Name="ListToolsBar"
+                               Grid.Row="1"
                                Margin="12,0,12,8"
-                               Orientation="Horizontal"
-                               Visibility="{Binding ListHeaderVisibility}">
+                               Orientation="Horizontal">
                         <Button Content="{Binding SortDirLabel}"
                                 Style="{StaticResource SortButton}"
                                 ToolTip="排序正序 / 倒序切换（自然序：(1) (2) (11)）"

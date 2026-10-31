@@ -285,11 +285,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     /// <summary>
     /// 收起后左栏的宽度——这是**下限**，也是刚收起、还没量出内容时的默认值。
-    /// 别再压了：面板 168 → 列表实测 156 → 扣掉滚动条余量后档案名列约 134，
-    /// 再减去行内边距，一行能露出一截中文文件名；再窄就只剩省略号，等于没有信息。
+    /// 定在 224 而不是更窄，是因为抬头那行「排序 / ↑ 回上层 / 选择文件夹」三个按钮
+    /// 收起态也留着（用户要求），实测并排放下它们连边距在内要 210.4，这里留约 14 的余量
+    /// （换台机器字体度量略有出入也不至于挤成两行）；
+    /// 扣掉滚动条余量后档案名列仍有一截中文可见。
     /// 名字更长的目录会按内容往上加，一直加到 <see cref="ListCollapsedMaxWidth"/> 为止。
     /// </summary>
-    private const double ListCollapsedWidth = 168;
+    private const double ListCollapsedWidth = 224;
 
     /// <summary>
     /// 收起态的上限。定得比展开态（<see cref="ListMinWidth"/>~<see cref="ListMaxWidth"/>）明显低一截，
@@ -522,7 +524,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         // 列表收起状态沿用上次
         _listCollapsed = _state.ListCollapsed;
         OnPropertyChanged(nameof(ListColumnWidth));
-        OnPropertyChanged(nameof(ListHeaderVisibility));
         OnPropertyChanged(nameof(ListCollapseGlyph));
         OnPropertyChanged(nameof(ListCollapseTip));
 
@@ -884,8 +885,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
                 _listCollapsed = false;
                 _state.ListCollapsed = false;
-                OnPropertyChanged(nameof(ListHeaderVisibility));
-                OnPropertyChanged(nameof(ListCollapseGlyph));
+                        OnPropertyChanged(nameof(ListCollapseGlyph));
                 OnPropertyChanged(nameof(ListCollapseTip));
                 OnPropertyChanged(nameof(NameColWidth));
                 OnPropertyChanged(nameof(SizeColWidth));
@@ -1144,10 +1144,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void FileList_SizeChanged(object sender, SizeChangedEventArgs e) =>
         OnPropertyChanged(nameof(NameColWidth));
 
-    /// <summary>抬头（来源 + 张数）与「目录 + 排序/回上层/选择文件夹」两行：收起时一并藏掉，
-    /// 左栏只留下档案名那一列和展开箭头。</summary>
-    public Visibility ListHeaderVisibility => _listCollapsed ? Visibility.Collapsed : Visibility.Visible;
-
     /// <summary>
     /// 窗口宽度变了，标题栏里路径能放下多少也就变了，省略位置要重算。
     /// 只有宽度变了才刷：上下拖高度不该碰标题。
@@ -1183,7 +1179,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         OnPropertyChanged(nameof(NameColWidth));
         OnPropertyChanged(nameof(SizeColWidth));
         OnPropertyChanged(nameof(DateColWidth));
-        OnPropertyChanged(nameof(ListHeaderVisibility));
         OnPropertyChanged(nameof(ListCollapseGlyph));
         OnPropertyChanged(nameof(ListCollapseTip));
 
