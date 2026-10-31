@@ -399,8 +399,52 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>导航序号：连点「..」时用来丢掉先发后到的旧扫描结果。</summary>
     private long _navSeq;
 
-    /// <summary>目录容量求和的序号：换目录后旧的那批结果就别回填了。</summary>
-    private long _folderSizeSeq;
+    // ---- 子文件夹容量：只算滚到眼前的行 ----
+
+    /// <summary>
+    /// 单个目录求和最多数多少个文件 / 最多花多久。
+    /// 图库里一个子文件夹动辄上万张图，全数一遍就是几万次文件枚举、几十秒磁盘 IO，
+    /// 所以要有闸门。但闸门**宽**：因为求和只在用户空闲时跑，且用户一动就让路
+    /// （见 <see cref="IsUserIdle"/>），没必要为了抢时间牺牲精度——
+    /// 实测这台机器数一个 7400 文件的套图目录约 1.6 秒，闸门给到 2 万文件 / 5 秒
+    /// 足以让绝大多数目录给出**精确值**，只有真正的巨型目录才会撞线。
+    /// </summary>
+    private const int FolderSizeFileCap = 20000;
+    private static readonly TimeSpan FolderSizeBudget = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// 用户多久没动过键盘鼠标才算「空闲」，可以开始算容量了。
+    /// 取 1.2 秒：翻图、滚动的间隔一般都比这短，停下来看列表时才会接着算。
+    /// </summary>
+    private const long IdleDelayMs = 1200;
+
+    /// <summary>
+    /// 最后一次「用户在忙」的时间戳（TickCount64）。
+    /// 经 Volatile 读写：后台线程要拿它判断能不能动磁盘，普通字段可能被读成旧副本
+    /// （C# 不允许 volatile long，所以走 Volatile.Read / Write）。
+    ///
+    /// 只记**真会抢磁盘的操作**（翻页 / 导航 / 滚动 / 按键 / 缩放），不记鼠标移动：
+    /// 一开始挂在输入管理器上（任何输入都算），结果实测永远等不到空闲——
+    /// 鼠标停着不动时，界面一有变化 WPF 就重新做命中测试，鼠标事件照样一二百毫秒来一次，
+    /// 判据被自己搅乱，容量一列永远填不上。
+    /// </summary>
+    private long _lastInputAt;
+
+    /// <summary>打一下「用户正在操作」的时间戳；容量求和不该在这时候抢磁盘。</summary>
+    private void MarkUserBusy() => Volatile.Write(ref _lastInputAt, Environment.TickCount64);
+
+    /// <summary>算过的目录记在这里（本次会话内），滚回去不再重算。</summary>
+    private readonly Dictionary<string, (long Bytes, bool Approx)> _folderSizeCache =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>待算的目录行。只放**当前看得见**的行，滚过的会被丢弃。</summary>
+    private readonly Queue<FsEntry> _folderSizeQueue = new();
+    private readonly HashSet<FsEntry> _folderSizeQueued = new();
+    private readonly object _folderSizeLock = new();
+    private bool _folderSizeBusy;
+
+    /// <summary>列宽刷新的节流时间戳：容量一行行填进来，不必每行都重排一次三列。</summary>
+    private long _colFitAt;
 
     /// <summary>当前目录里不支持预览的文件（左栏灰色行），换目录时整批替换。</summary>
     private List<FsEntry> _others = new();
@@ -450,6 +494,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _slideTimer.Interval = TimeSpan.FromMilliseconds(SlideIntervalMs);
         _slideTimer.Tick += (_, _) => Go(1);
         _posTimer.Tick += (_, _) => { _posTimer.Stop(); FlushPos(); };
+
+        Volatile.Write(ref _lastInputAt, Environment.TickCount64);
 
         Loaded += (_, _) =>
         {
@@ -1276,6 +1322,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     Status = $"上次的目录还在，但里面没有可预览的图片（{FolderLabel(root)}）";
                     restored = true;
                 }
+
+                // 启动就落在一个子目录里，第一次点「回上层」同样想秒开
+                if (!recursive)
+                {
+                    PrefetchParent(root);
+                }
             }
 
             if (!restored && !_userLoaded)
@@ -1866,70 +1918,208 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         // 行数变了要重判空态：目录里没图但有「..」/子文件夹时，不能再拿「还没有图片」盖住列表
         OnPropertyChanged(nameof(ListEmptyVisibility));
 
-        // 子文件夹的总容量要在后台慢慢算（递归枚举，不能占 UI 线程）。
-        // 扫描期间那几行马上就会被新行替掉，不必白算一遍。
-        if (!_listing)
+        // 换了一批行：上一批待算的目录全作废（连同正在算的那个），
+        // 新的容量请求由「滚到眼前」的行自己提出（见 RequestFolderSize）。
+        ResetFolderSizeWork();
+    }
+
+    /// <summary>
+    /// 换目录 / 换排序：把待算队列清空（正在算的那一个最多再跑 2 秒就到闸门，
+    /// 算出来的结果照样进缓存——那是磁盘上的事实，回头再看同一层直接命中）。
+    /// </summary>
+    private void ResetFolderSizeWork()
+    {
+        lock (_folderSizeLock)
         {
-            FillFolderSizes();
+            _folderSizeQueue.Clear();
+            _folderSizeQueued.Clear();
         }
     }
 
     /// <summary>
-    /// 后台算每个子文件夹的总容量（递归求和）。
-    /// 一次只走一个目录，算完一个回填一个，用户会看到 … 逐个变成 2.35 GB；
-    /// 中途换目录就靠 <see cref="_folderSizeSeq"/> 让旧任务自行收工。
+    /// 现在能不能动磁盘做后台活：没在扫描新目录，且用户有 1.2 秒没翻页 / 导航 / 滚动 / 按键。
     /// </summary>
-    private void FillFolderSizes()
-    {
-        List<FsEntry> dirs = new();
-        foreach (FsEntry e in _entries)
-        {
-            if (e.IsFolder)
-            {
-                dirs.Add(e);
-            }
-        }
+    private bool IsUserIdle() =>
+        !_listing && Environment.TickCount64 - Volatile.Read(ref _lastInputAt) >= IdleDelayMs;
 
-        if (dirs.Count == 0)
+    /// <summary>
+    /// 提一个「把这一行的容量算出来」的请求。
+    ///
+    /// 只给**看得见的行**提：容器是虚拟化生成的，屏幕上那二十来行才有容器，
+    /// 于是滚动到哪算到哪；一屏之外的目录行根本不排进队列。
+    /// 之前是把本层所有子文件夹一口气排上队——几十个目录 × 每个上万文件 = 几十秒的磁盘 IO，
+    /// 「回上层」之后光是把大小列填完就要等很久，期间翻图、解码全被它拖慢。
+    /// </summary>
+    private void RequestFolderSize(FsEntry? row)
+    {
+        if (row is null || !row.IsFolder || row.Size >= 0)
         {
             return;
         }
 
-        long seq = ++_folderSizeSeq;
-        _ = Task.Run(async () =>
+        // 算过就直接回填，连后台线程都不必惊动
+        if (_folderSizeCache.TryGetValue(row.Path, out (long Bytes, bool Approx) hit))
         {
-            foreach (FsEntry d in dirs)
+            row.Size = hit.Bytes;
+            row.SizeApprox = hit.Approx;
+            return;
+        }
+
+        lock (_folderSizeLock)
+        {
+            if (!_folderSizeQueued.Add(row))
             {
-                if (seq != _folderSizeSeq)
-                {
-                    return; // 已经换到别的目录了，这批结果没人要
-                }
-
-                long total = FolderSize(d.Path);
-
-                await Dispatcher.InvokeAsync(() =>
-                {
-                    if (seq != _folderSizeSeq)
-                    {
-                        return;
-                    }
-
-                    d.Size = total;
-
-                    // 总容量比图片的字节数短（2.35 GB vs 13,850,860），列宽要重新量一次
-                    AutoFitListColumns();
-                }, DispatcherPriority.Background);
+                return;
             }
-        });
+
+            _folderSizeQueue.Enqueue(row);
+        }
+
+
+        if (!_folderSizeBusy)
+        {
+            _folderSizeBusy = true;
+            _ = FolderSizeWorkerAsync();
+        }
     }
 
     /// <summary>
-    /// 递归求一个目录下所有文件的大小之和。
+    /// 一次只算一个目录的串行工人。刻意不并行：几个目录一起递归枚举
+    /// 只会把磁盘队列塞满，谁都快不了，还会把前台的解码一起拖下水。
+    /// </summary>
+    private async Task FolderSizeWorkerAsync()
+    {
+        try
+        {
+            while (true)
+            {
+                FsEntry? row;
+                lock (_folderSizeLock)
+                {
+                    if (_folderSizeQueue.Count == 0)
+                    {
+                        _folderSizeBusy = false;
+                        return;
+                    }
+
+                    row = _folderSizeQueue.Dequeue();
+                    _folderSizeQueued.Remove(row);
+                }
+
+                if (row.Size >= 0)
+                {
+                    continue; // 期间已经填上了
+                }
+
+                        // **只在用户没操作的时候算**。翻页、滚动、导航期间一律不碰磁盘——
+                // 之前没有这道闸，回上层之后后台能连着扫几十秒，
+                // 磁盘队列被占满，翻图和解码全被拖慢（这就是"回上层要等好几秒"的由来）。
+                // 用户一动，正在算的那个也会在 256 个文件内停手让路。
+                int waited = 0;
+                while (!IsUserIdle())
+                {
+                    await Task.Delay(250);
+
+                    waited++;
+
+                    // 兜底：真遇到「用户一直在翻」的情况，等满 20 秒就放弃这一轮，
+                    // 免得工人一直挂着、后面的行永远排不上
+                    if (waited > 80)
+                    {
+                        lock (_folderSizeLock)
+                        {
+                            _folderSizeQueue.Clear();
+                            _folderSizeQueued.Clear();
+                        }
+
+                        _folderSizeBusy = false;
+                        return;
+                    }
+
+                    lock (_folderSizeLock)
+                    {
+                        if (_folderSizeQueue.Count == 0)
+                        {
+                            _folderSizeBusy = false;
+                            return;
+                        }
+                    }
+                }
+
+                // 出队之后还要再确认一次「这一行还在屏幕上」：
+                // 快速滚过的行、以及换目录后被换掉的行，容器都已经不在了，不值得为它读盘。
+                // 容器没了 == 这一行不在当前可见范围（虚拟化只给可见行建容器）。
+                bool visible = await Dispatcher.InvokeAsync(
+                    () => FileList.ItemContainerGenerator.ContainerFromItem(row) is not null,
+                    DispatcherPriority.Background);
+
+                if (!visible)
+                {
+                    continue;
+                }
+
+                string dir = row.Path;
+                (long Bytes, bool Approx) r;
+
+                if (_folderSizeCache.TryGetValue(dir, out r))
+                {
+                    // 排队期间被别的路径算出来了
+                }
+                else
+                {
+                    // stop 回调：用户一动就停手（最多再多数 255 个文件，几十毫秒内让出磁盘）
+                    r = await Task.Run(() => FolderSizeCapped(dir, () => !IsUserIdle()));
+
+                    lock (_folderSizeLock)
+                    {
+                        _folderSizeCache[dir] = r;
+                    }
+                }
+
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (row.Size < 0)
+                    {
+                        row.Size = r.Bytes;
+                        row.SizeApprox = r.Approx;
+                    }
+                }, DispatcherPriority.Background);
+
+                // 容量一行行填进来，三列宽度跟着变；每来一行都重排太碎，攒 300 ms 一批
+                long now = Environment.TickCount64;
+                if (now - _colFitAt > 300)
+                {
+                    _colFitAt = now;
+                    await Dispatcher.InvokeAsync(() => AutoFitListColumns(), DispatcherPriority.Background);
+                }
+
+                // 没有总预算：让路交给 IsUserIdle —— 用户在动就立刻停，
+                // 停下来了就接着把这一屏算完（比按预算砍一半要实用）。
+            }
+        }
+        catch
+        {
+            _folderSizeBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// 递归求一个目录下所有文件的大小之和，**带闸门**：
+    /// 数到 <see cref="FolderSizeFileCap"/> 个文件或超过 <see cref="FolderSizeBudget"/> 就停手，
+    /// 返回已经累加到的值并把 Approx 置真（显示成 "&gt; 1.2 GB" 这种下限值）。
+    ///
+    /// 为什么必须有闸门：图库里一个子文件夹能有上万张图，几十个这样的目录全数一遍
+    /// 就是几十万次文件枚举、几十秒磁盘 IO。「大小」只是个参考数，
+    /// 为它把整台机器的磁盘占满、把翻图和解码一起拖慢，划不来。
+    ///
     /// AttributesToSkip 里带上 ReparsePoint：不跟着符号链接 / 目录联接走，否则可能绕圈走不完。
     /// </summary>
-    private static long FolderSize(string dir)
+    private static (long Bytes, bool Approx) FolderSizeCapped(string dir, Func<bool>? stop = null)
     {
         long total = 0;
+        int n = 0;
+        System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+
         try
         {
             EnumerationOptions opt = new()
@@ -1951,14 +2141,29 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 {
                     // 单个文件读不到就跳过
                 }
+
+                n++;
+
+                // 每 256 个查一次表就够了：Stopwatch 和 stop 回调本身也有开销，逐个查不划算。
+                // 256 个文件的枚举也就几十毫秒，用户一动到真正让出磁盘最多这点延迟。
+                if (n % 256 == 0 && (sw.Elapsed >= FolderSizeBudget || (stop?.Invoke() ?? false)))
+                {
+                    return (total, true);
+                }
+
+                if (n >= FolderSizeFileCap)
+                {
+                    return (total, sw.Elapsed >= FolderSizeBudget || (stop?.Invoke() ?? false));
+                }
             }
         }
         catch
         {
-            // 目录没权限：能加到多少算多少
+            // 目录没权限：能加到多少算多少。没数完的一律按近似处理，不冒充精确值
+            return (total, true);
         }
 
-        return total;
+        return (total, false);
     }
 
     /// <summary>列出目录下的直接子文件夹（只一层，不递归）。</summary>
@@ -2032,6 +2237,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void ZoomBy(double factor)
     {
+        MarkUserBusy();
         _viewTouched = true;
         _zoom = Clamp(_zoom * factor, MinScale, MaxScale);
         UnbakeZoom();
@@ -2168,6 +2374,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void Select(int idx)
     {
+        MarkUserBusy();
         // 换目录扫描期间 _items 还是上层的，这时翻页只会翻出「列表里根本没有」的图
         if (_listing || idx < 0 || idx >= _items.Count)
         {
@@ -2188,6 +2395,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void Go(int delta)
     {
+        MarkUserBusy(); // 翻页：别让后台算容量来抢磁盘
         if (_listing || _items.Count == 0)
         {
             return;
@@ -3380,6 +3588,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void SchedulePreload()
     {
+        // 换目录的扫描期间不预载：那会儿磁盘正忙着枚举新目录，
+        // 再叠上几张图的解码只会互相拖慢。扫描落地时 ApplyItems 会再叫一次，不会漏。
+        if (_listing)
+        {
+            return;
+        }
+
         // 画布尺寸变了 → 预载清晰度档位跟着变，旧档位的缓存作废重解
         int want = PreloadTargetEdge();
         if (want != _previews.Edge)
@@ -3596,9 +3811,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// （「打开图库」是这个模式），为假时只取这一层——子文件夹会作为可进入的行列在左侧，
     /// 也就是文件浏览器模式。
     /// </summary>
-    private async Task LoadFolderAsync(string root, string kind, bool recursive, string? focusPath = null)
+    private async Task LoadFolderAsync(string root, string kind, bool recursive, string? focusPath = null,
+                                       ScanResult? prefetched = null)
     {
         _userLoaded = true; // 用户主动开目录：启动时的自动恢复要让路
+        MarkUserBusy();     // 换目录的当口：后台的容量求和先让路
         BrowseDir = recursive ? null : root; // null ⇒ 左侧不显示 .. 与子文件夹
         long seq = ++_navSeq;
 
@@ -3609,7 +3826,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         FileList.SelectedIndex = -1;
         Status = "正在扫描文件夹…";
 
-        ScanResult scan = await Task.Run(() => ScanFolder(root, recursive));
+        ScanResult scan = prefetched ?? await Task.Run(() => ScanFolder(root, recursive));
 
         if (seq != _navSeq)
         {
@@ -3618,6 +3835,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         }
 
         _listing = false;
+        MarkUserBusy(); // 刚扫完：接下来要解码首图，容量求和再等一会儿
 
         if (scan.Images.Count == 0)
         {
@@ -3647,6 +3865,64 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 }
             }
         }
+
+        // 进了子目录就顺手把**上层**预先扫一遍：点「↑ 回上层」是最高频的操作，
+        // 命中预取就能直接上列表，不用再等一次扫描。延迟一会儿再动，先让首屏那张图解码完。
+        if (!recursive)
+        {
+            PrefetchParent(root);
+        }
+    }
+
+    // ---- 回上层预取 ----
+
+    /// <summary>上层目录已经扫好的结果（只有一项：最近一次所在目录的父目录）。</summary>
+    private string _prefetchDir = "";
+    private ScanResult? _prefetchScan;
+    private readonly object _prefetchLock = new();
+
+    private static string? ParentOf(string dir)
+    {
+        try
+        {
+            return Directory.GetParent(dir.TrimEnd(Path.DirectorySeparatorChar))?.FullName;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 后台把 <paramref name="root"/> 的父目录扫一遍存着，等用户点「↑ 回上层」时直接用。
+    ///
+    /// 只缓存一项、且只在单层浏览模式下做：递归图库模式没有「上一层」的概念。
+    /// 取用前会比对目录路径，对不上就当没缓存（用户早就走到别处了）。
+    /// </summary>
+    private void PrefetchParent(string root)
+    {
+        string? parent = ParentOf(root);
+        if (parent is null)
+        {
+            return;
+        }
+
+        long seq = _navSeq;
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(1200); // 避开刚进目录那一下的首图解码
+            if (seq != _navSeq)
+            {
+                return; // 这期间又换地方了，这份预取没意义
+            }
+
+            ScanResult scan = ScanFolder(parent, false);
+            lock (_prefetchLock)
+            {
+                _prefetchDir = parent;
+                _prefetchScan = scan;
+            }
+        });
     }
 
     /// <summary>
@@ -4035,6 +4311,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        MarkUserBusy();
         // Ctrl+G：GPU 加速开关（其余快捷键不接修饰键，故单独在这里判）
         if (e.Key == Key.G && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
         {
@@ -4499,7 +4776,31 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void FileList_MouseLeave(object sender, MouseEventArgs e) => HideHoverThumb();
 
     /// <summary>列表滚动：屏幕坐标下的行已经换了，先收起，等鼠标再动一次重新判定。</summary>
-    private void FileList_ScrollChanged(object sender, ScrollChangedEventArgs e) => HideHoverThumb();
+    private void FileList_ScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        MarkUserBusy(); // 滚动：列表正被滚着走，先别去读盘
+        HideHoverThumb();
+    }
+
+    /// <summary>
+    /// 行容器生成 —— 这一行进了可见范围。趁这个时机把子文件夹的容量排上队。
+    /// 虚拟化下容器只为屏幕上的行建，所以天然就是「算看得见的」。
+    /// </summary>
+    private void FileItem_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is not ListBoxItem item)
+        {
+            return;
+        }
+
+        RequestFolderSize(item.DataContext as FsEntry);
+
+        // 容器被拿去显示另一行时不会重新 Loaded，得靠 DataContext 变化补一次
+        item.DataContextChanged += FileItem_DataContextChanged;
+    }
+
+    private void FileItem_DataContextChanged(object sender, DependencyPropertyChangedEventArgs e) =>
+        RequestFolderSize((sender as ListBoxItem)?.DataContext as FsEntry);
 
     /// <summary>
     /// 左侧点一下：图片立刻上右边显示；子文件夹直接进；「..」回上一级。
@@ -4564,14 +4865,26 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        DirectoryInfo? parent = Directory.GetParent(_browseDir.TrimEnd(Path.DirectorySeparatorChar));
+        string? parent = ParentOf(_browseDir);
         if (parent is null)
         {
             Status = "已经是盘符根目录";
             return;
         }
 
-        _ = LoadFolderAsync(parent.FullName, "folder", recursive: false);
+        // 预取命中就直接上，省掉一次扫描（进子目录时已经把上层扫好了）
+        ScanResult? hot = null;
+        lock (_prefetchLock)
+        {
+            if (string.Equals(_prefetchDir, parent, StringComparison.OrdinalIgnoreCase))
+            {
+                hot = _prefetchScan;
+                _prefetchScan = null; // 一次性：这批 ImageItem 马上就要被 ApplyItems 接管
+                _prefetchDir = "";
+            }
+        }
+
+        _ = LoadFolderAsync(parent, "folder", recursive: false, prefetched: hot);
     }
 
     private void Window_DragOver(object sender, DragEventArgs e)
@@ -4795,6 +5108,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void ActSortDir(object sender, RoutedEventArgs e)
     {
+        MarkUserBusy();
         _sortDesc = !_sortDesc;
         OnPropertyChanged(nameof(SortDirLabel));
         Resort();

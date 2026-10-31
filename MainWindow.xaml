@@ -160,7 +160,8 @@
                                                    Text="{Binding SizeText}"
                                                    FontSize="11"
                                                    Foreground="#7f88a3"
-                                                   HorizontalAlignment="Right" />
+                                                   HorizontalAlignment="Right"
+                                                   ToolTip="{Binding SizeTip}" />
                                         <TextBlock Grid.Column="2"
                                                    Text="{Binding DateText}"
                                                    FontSize="11"
@@ -178,6 +179,10 @@
                                      只在被双击的那个 Control 自身触发、不冒泡，
                                      所以挂到 ListBox 上是收不到行的双击的。 -->
                                 <EventSetter Event="MouseDoubleClick" Handler="FileItem_MouseDoubleClick" />
+                                <!-- 容器生成 = 这一行真的进了可见范围（虚拟化只给屏幕上的行建容器）。
+                                     子文件夹的容量就靠这个时机去算：滚到哪算到哪，
+                                     一屏之外的目录根本不排进队列。 -->
+                                <EventSetter Event="Loaded" Handler="FileItem_Loaded" />
                                 <Setter Property="Padding" Value="0" />
                                 <Setter Property="Margin" Value="0,0,0,2" />
                                 <Setter Property="HorizontalContentAlignment" Value="Stretch" />

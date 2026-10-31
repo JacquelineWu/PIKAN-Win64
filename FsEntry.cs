@@ -123,6 +123,27 @@ public sealed class FsEntry : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// 容量是**扫到一半就停手**的下限值（目录太大，没数完）。
+    /// 为真时大小列前面加个 "&gt;"，免得把下限值当成精确值看。
+    /// </summary>
+    public bool SizeApprox
+    {
+        get => _sizeApprox;
+        set
+        {
+            if (_sizeApprox == value)
+            {
+                return;
+            }
+
+            _sizeApprox = value;
+            OnPropertyChanged(nameof(SizeText));
+        }
+    }
+
+    private bool _sizeApprox;
+
     /// <summary>文件修改时间，未知为 null（与体积一样由后台分批补测）。</summary>
     public DateTime? Modified
     {
@@ -141,7 +162,7 @@ public sealed class FsEntry : INotifyPropertyChanged
 
     /// <summary>
     /// 「大小」一列。图片按字节数带千分位（要的就是原始 byte）；
-    /// 文件夹显总容量（后台递归求和，算完之前先是 …）；「..」留空。
+    /// 文件夹显总容量——**只有滚到眼前才去算**，没算之前留空；「..」留空。
     /// </summary>
     public string SizeText
     {
@@ -154,7 +175,10 @@ public sealed class FsEntry : INotifyPropertyChanged
 
             if (IsFolder)
             {
-                return Size < 0 ? "…" : ImageItem.FormatBytes(Size);
+                // 没算 / 还没轮到 → 留空（不挂「…」：… 看着像"正在算"，
+                // 其实这一行可能压根没排上队）。撞了闸门的给个带 > 的下限值，
+                // 悬停里说明它不是精确值。
+                return Size < 0 ? "" : (SizeApprox ? "> " : "") + ImageItem.FormatBytes(Size);
             }
 
             return Size > 0 ? Size.ToString("N0", CultureInfo.InvariantCulture) : "--";
@@ -163,6 +187,15 @@ public sealed class FsEntry : INotifyPropertyChanged
 
     /// <summary>「日期」一列：年-月-日 时:分，未测到留空。</summary>
     public string DateText => _modified is { } m ? m.ToString("yyyy-MM-dd HH:mm") : "";
+
+    /// <summary>
+    /// 大小列的悬停说明：这一格为什么是空的。
+    /// 撞了闸门（扫到一半就停手）才解释一句；单纯"还没轮到算"就不弹提示。
+    /// 返回 null 时不弹（空字符串会弹一个空框）。
+    /// </summary>
+    public string? SizeTip => IsFolder && Size >= 0 && SizeApprox
+        ? "这个目录太大（或算的时候你在操作），只扫了一部分：前面带 > 的是下限，实际更大"
+        : null;
 
     /// <summary>
     /// 文件名颜色，一眼分清三种行：
