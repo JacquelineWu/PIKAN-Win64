@@ -15,7 +15,8 @@
         Closing="Window_Closing"
         Drop="Window_Drop"
         DragOver="Window_DragOver"
-        DpiChanged="Window_DpiChanged">
+        DpiChanged="Window_DpiChanged"
+        SizeChanged="Window_SizeChanged">
 
     <Grid SnapsToDevicePixels="True">
         <Grid.RowDefinitions>

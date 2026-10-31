@@ -151,6 +151,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// </summary>
     private string? _browseDir;
 
+    /// <summary>标题栏上软件名与路径之间的分隔。</summary>
+    private const string AppTitle = "PIKAN";
+    private const string TitleSep = " — ";
+
+    /// <summary>标题栏用的字体（系统画的那一栏，字号字重跟系统走，不能按自己的界面字体量）。</summary>
+    private static readonly Typeface CaptionFace = new(SystemFonts.CaptionFontFamily,
+                                                       SystemFonts.CaptionFontStyle,
+                                                       SystemFonts.CaptionFontWeight,
+                                                       FontStretches.Normal);
+
     /// <summary>
     /// 改当前浏览目录。窗口标题、左栏「目录」行、「回上层」按钮三处都跟着它变，
     /// 所以赋值一律走这里——散在各处直接写 <c>_browseDir</c> 迟早会漏刷其中某一处。
@@ -441,7 +451,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _slideTimer.Tick += (_, _) => Go(1);
         _posTimer.Tick += (_, _) => { _posTimer.Stop(); FlushPos(); };
 
-        Loaded += (_, _) => UpdateTransform();
+        Loaded += (_, _) =>
+        {
+            UpdateTransform();
+            // 这时候才知道窗口到底多宽，标题栏路径的省略位置要按真实宽度重算
+            OnPropertyChanged(nameof(WindowTitle));
+        };
         Closed += (_, _) => Perf.FlushSync();
 
         // 帧间隔监控：UI 线程被冻结多久会直接体现成"顿一下"
@@ -489,13 +504,138 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public string DirLabel => _browseDir ?? "（非目录浏览）";
 
     /// <summary>
-    /// 窗口标题栏上的文字：软件名 + 当前目录的**完整路径**。
+    /// 窗口标题栏上的文字：软件名 + 当前目录的路径。
     ///
     /// 路径挂在这里（窗口系统标题栏）而不是左栏里单独占一行：抬头那一行要放三个按钮，
     /// 让一行路径把按钮挤下去不值。左栏收起来时照样看得到当前在哪，是全屏之外唯一的路标。
     /// 非浏览模式没有"当前目录"这个概念（递归图库 / 手工挑的散图），就只留软件名。
+    ///
+    /// 放不下时**自己**在中间打省略号，绝不能交给系统去截：系统一律从尾巴上截，
+    /// 而尾巴那一截正是「我现在在哪个文件夹」，恰恰是最不能丢的。
     /// </summary>
-    public string WindowTitle => _browseDir is null ? "PIKAN" : "PIKAN — " + _browseDir;
+    public string WindowTitle
+    {
+        get
+        {
+            if (_browseDir is null)
+            {
+                return AppTitle;
+            }
+
+            string prefix = AppTitle + TitleSep;
+
+            // 窗口还没布局过（构造到 Show 之间）：先给完整的，Loaded 之后再按宽度算一次
+            double room = TitleTextRoom();
+            if (room <= 0)
+            {
+                return prefix + _browseDir;
+            }
+
+            if (MeasureTitle(prefix + _browseDir) <= room)
+            {
+                return prefix + _browseDir;
+            }
+
+            return prefix + CompactPath(_browseDir, room - MeasureTitle(prefix));
+        }
+    }
+
+    /// <summary>
+    /// 把路径压到 <paramref name="room"/> 这么宽：省略号打在**中间**，
+    /// 末尾那一截（当前文件夹名）整段保留，前面能补回多少补多少。
+    ///
+    /// 只有窗口窄到连一个文件夹名都放不下时，才退化成从头开始的尾省略。
+    /// </summary>
+    private string CompactPath(string path, double room)
+    {
+        const string ell = "…";
+        double ellW = MeasureTitle(ell);
+
+        int lastSep = path.LastIndexOf('\\');
+        string tail = lastSep >= 0 ? path.Substring(lastSep + 1) : path;
+
+        // ① 末尾这整段是底线。连它都放不下，就没别的可省了，只能从头部往后截
+        if (ellW + MeasureTitle(tail) > room)
+        {
+            return FitTitlePrefix(path, room - ellW) + ell;
+        }
+
+        // ② 剩下的宽度尽量从开头补回来，并回退到最后一个分隔符——
+        //    别把某个目录名切成半截，那样更难认
+        string head = FitTitlePrefix(path, room - ellW - MeasureTitle(tail));
+        int cut = head.LastIndexOf('\\');
+        if (cut > 0)
+        {
+            head = head.Substring(0, cut + 1);
+        }
+
+        return head + ell + tail;
+    }
+
+    /// <summary>取 s 的最长前缀，使其按标题栏字体排出来不超过 room 宽。</summary>
+    private string FitTitlePrefix(string s, double room)
+    {
+        if (room <= 0 || s.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        if (MeasureTitle(s) <= room)
+        {
+            return s;
+        }
+
+        int lo = 0;
+        int hi = s.Length;
+        while (lo < hi)
+        {
+            int mid = (lo + hi + 1) / 2;
+            if (MeasureTitle(s.Substring(0, mid)) <= room)
+            {
+                lo = mid;
+            }
+            else
+            {
+                hi = mid - 1;
+            }
+        }
+
+        // 别把代理对（emoji 之类）切两半
+        if (lo > 0 && lo < s.Length && char.IsLowSurrogate(s[lo]))
+        {
+            lo--;
+        }
+
+        return s.Substring(0, lo);
+    }
+
+    /// <summary>按系统标题栏的字体量一段文字的宽（DIP）。</summary>
+    private double MeasureTitle(string s) =>
+        s.Length == 0 ? 0 : new FormattedText(
+            s, CultureInfo.CurrentCulture, System.Windows.FlowDirection.LeftToRight,
+            CaptionFace, SystemFonts.CaptionFontSize, System.Windows.Media.Brushes.White,
+            Math.Max(1.0, VisualTreeHelper.GetDpi(this).PixelsPerDip)).Width;
+
+    /// <summary>
+    /// 系统标题栏里留给文字的宽度（DIP）。窗口还没布局过时返回 0。
+    ///
+    /// 整窗宽要扣掉左边窗口图标、右边最小化/最大化/关闭三个按钮——这两块的实际尺寸
+    /// 没法问到准确值，只能估。**估大了系统会自己再从尾巴上截一刀**，末尾的目录名就白保了，
+    /// 所以刻意多扣一点当安全垫。
+    /// </summary>
+    private double TitleTextRoom()
+    {
+        const double iconRoom = 34;        // 窗口图标 + 左边距
+        const double captionButtons = 150; // 三个系统按钮（DPI 缩放下基本恒定）
+        const double slack = 32;           // 安全垫
+
+        if (ActualWidth <= 0)
+        {
+            return 0;
+        }
+
+        return Math.Max(120, ActualWidth - iconRoom - captionButtons - slack);
+    }
 
     /// <summary>排序方向按钮上的文案。</summary>
     public string SortDirLabel => _sortDesc ? "排序 ↓" : "排序 ↑";
@@ -941,6 +1081,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// <summary>抬头（来源 + 张数）与「目录 + 排序/回上层/选择文件夹」两行：收起时一并藏掉，
     /// 左栏只留下档案名那一列和展开箭头。</summary>
     public Visibility ListHeaderVisibility => _listCollapsed ? Visibility.Collapsed : Visibility.Visible;
+
+    /// <summary>
+    /// 窗口宽度变了，标题栏里路径能放下多少也就变了，省略位置要重算。
+    /// 只有宽度变了才刷：上下拖高度不该碰标题。
+    /// </summary>
+    private void Window_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (e.WidthChanged)
+        {
+            OnPropertyChanged(nameof(WindowTitle));
+        }
+    }
 
     /// <summary>折叠按钮上的箭头：» = 「再点一下就展回来」。</summary>
     public string ListCollapseGlyph => _listCollapsed ? "»" : "«";
@@ -4483,6 +4635,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         RefreshImageInfo();
         // DPI 一变，同样的字号排出来的宽度就不同了，名字也得重量
         AutoFitListColumns(namesChanged: true);
+        // 标题栏是系统按系统字体画的，DPI 变了能放下的字数也变
+        OnPropertyChanged(nameof(WindowTitle));
         // 显式宽高按 DIP 存，DPI 一变同样的 DIP 对应的设备像素就不同了，必须重钉
         if (_viewOwned is not null)
         {
