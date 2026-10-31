@@ -1,7 +1,7 @@
 <Window x:Class="PIKAN.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="PIKAN"
+        Title="{Binding WindowTitle}"
         Width="1280" Height="780"
         MinWidth="720" MinHeight="440"
         WindowState="Maximized"
@@ -66,40 +66,28 @@
                                    Foreground="#7f88a3" />
                     </Grid>
 
-                    <!-- 当前目录 + 排序控件（收起时藏掉：三个按钮要占一整行，
-                         留着就违背"只剩档案名"的初衷了） -->
-                    <Grid Grid.Row="1" Margin="12,0,12,8"
-                          Visibility="{Binding ListHeaderVisibility}">
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto" />
-                            <RowDefinition Height="Auto" />
-                        </Grid.RowDefinitions>
-
-                        <TextBlock Grid.Row="0"
-                                   Text="{Binding DirLabel}"
-                                   FontSize="11"
-                                   Foreground="#6b7488"
-                                   TextTrimming="CharacterEllipsis"
-                                   ToolTip="{Binding DirLabel}"
-                                   Margin="0,0,0,6" />
-
-                        <!-- 窄栏（最小 260）时三个按钮放不下一行，用 WrapPanel 自动换行 -->
-                        <WrapPanel Grid.Row="1" Orientation="Horizontal">
-                            <Button Content="{Binding SortDirLabel}"
-                                    Style="{StaticResource SortButton}"
-                                    ToolTip="排序正序 / 倒序切换（自然序：(1) (2) (11)）"
-                                    Click="ActSortDir" />
-                            <Button Content="↑ 回上层"
-                                    Style="{StaticResource SortButton}"
-                                    ToolTip="回到上一级目录（退格键同效）"
-                                    IsEnabled="{Binding CanGoUp}"
-                                    Click="ActUpDir" />
-                            <Button Content="选择文件夹"
-                                    Style="{StaticResource SortButton}"
-                                    ToolTip="挑一个文件夹，只看这一层（子文件夹在列表里可以再点进去）"
-                                    Click="ActFolder" />
-                        </WrapPanel>
-                    </Grid>
+                    <!-- 排序 / 回上层 / 选择文件夹（收起时藏掉：三个按钮要占一整行，
+                         留着就违背"只剩档案名"的初衷了）。
+                         原先上面还有一行完整路径，现在搬到窗口标题栏去了（PIKAN 右边），
+                         左栏这一行就只放按钮。 -->
+                    <WrapPanel Grid.Row="1"
+                               Margin="12,0,12,8"
+                               Orientation="Horizontal"
+                               Visibility="{Binding ListHeaderVisibility}">
+                        <Button Content="{Binding SortDirLabel}"
+                                Style="{StaticResource SortButton}"
+                                ToolTip="排序正序 / 倒序切换（自然序：(1) (2) (11)）"
+                                Click="ActSortDir" />
+                        <Button Content="↑ 回上层"
+                                Style="{StaticResource SortButton}"
+                                ToolTip="回到上一级目录（退格键同效）"
+                                IsEnabled="{Binding CanGoUp}"
+                                Click="ActUpDir" />
+                        <Button Content="选择文件夹"
+                                Style="{StaticResource SortButton}"
+                                ToolTip="挑一个文件夹，只看这一层（子文件夹在列表里可以再点进去）"
+                                Click="ActFolder" />
+                    </WrapPanel>
 
                     <!-- 列标题：三列宽度与列表行绑的是同一组属性，永远对齐。
                          收起 / 展开按钮已经挪到左右分隔条的正中间（见下面的 ListCollapseBtn），

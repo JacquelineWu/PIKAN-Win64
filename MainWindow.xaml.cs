@@ -151,6 +151,27 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     /// </summary>
     private string? _browseDir;
 
+    /// <summary>
+    /// 改当前浏览目录。窗口标题、左栏「目录」行、「回上层」按钮三处都跟着它变，
+    /// 所以赋值一律走这里——散在各处直接写 <c>_browseDir</c> 迟早会漏刷其中某一处。
+    /// </summary>
+    private string? BrowseDir
+    {
+        get => _browseDir;
+        set
+        {
+            if (string.Equals(_browseDir, value, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _browseDir = value;
+            OnPropertyChanged(nameof(WindowTitle));
+            OnPropertyChanged(nameof(DirLabel));
+            OnPropertyChanged(nameof(CanGoUp));
+        }
+    }
+
     // ---- 列表排序 ----
     // 名称一律走自然序（(1) (2) (11) 按数字大小排），不再提供逐字符开关
     private bool _sortDesc;
@@ -466,6 +487,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     /// <summary>当前目录的完整路径；非浏览模式显示来源说明。</summary>
     public string DirLabel => _browseDir ?? "（非目录浏览）";
+
+    /// <summary>
+    /// 窗口标题栏上的文字：软件名 + 当前目录的**完整路径**。
+    ///
+    /// 路径挂在这里（窗口系统标题栏）而不是左栏里单独占一行：抬头那一行要放三个按钮，
+    /// 让一行路径把按钮挤下去不值。左栏收起来时照样看得到当前在哪，是全屏之外唯一的路标。
+    /// 非浏览模式没有"当前目录"这个概念（递归图库 / 手工挑的散图），就只留软件名。
+    /// </summary>
+    public string WindowTitle => _browseDir is null ? "PIKAN" : "PIKAN — " + _browseDir;
 
     /// <summary>排序方向按钮上的文案。</summary>
     public string SortDirLabel => _sortDesc ? "排序 ↓" : "排序 ↑";
@@ -1067,7 +1097,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
                 // 上次是「打开图库」（递归摊平）就按递归恢复，是浏览模式就恢复单级 + 子文件夹
                 bool recursive = p.LastKind == "gallery";
-                _browseDir = recursive ? null : root;
+                BrowseDir = recursive ? null : root;
                 ScanResult scan = await Task.Run(() => ScanFolder(root, recursive));
 
                 // 扫描这几百毫秒里用户可能已经自己开了别的图库，那就别覆盖
@@ -1120,7 +1150,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return false;
         }
 
-        _browseDir = null; // 这批是快照里的文件，不是「正在浏览某个目录」
+        BrowseDir = null; // 这批是快照里的文件，不是「正在浏览某个目录」
         ApplyItems(list, _state.LastSrc.Length > 0 ? _state.LastSrc : "上次会话");
         return true;
     }
@@ -1290,6 +1320,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         OnPropertyChanged(nameof(CountLabel));
         OnPropertyChanged(nameof(DirLabel));
         OnPropertyChanged(nameof(CanGoUp));
+        OnPropertyChanged(nameof(WindowTitle));
 
         // 先算出落点再解码：否则会先按第 1 张解一遍、恢复时又解一遍，白白多一次大图解码
         int start = RestoreIndex(list);
@@ -3391,7 +3422,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             MarkSource(dir, "files");
         }
 
-        _browseDir = null; // 挑出来的一批散图，左侧不显示 .. 与子文件夹
+        BrowseDir = null; // 挑出来的一批散图，左侧不显示 .. 与子文件夹
         ApplyItems(picked, "选择的文件");
     }
 
@@ -3416,7 +3447,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private async Task LoadFolderAsync(string root, string kind, bool recursive, string? focusPath = null)
     {
         _userLoaded = true; // 用户主动开目录：启动时的自动恢复要让路
-        _browseDir = recursive ? null : root; // null ⇒ 左侧不显示 .. 与子文件夹
+        BrowseDir = recursive ? null : root; // null ⇒ 左侧不显示 .. 与子文件夹
         long seq = ++_navSeq;
 
         // 扫描是异步的，先把左侧换成「..」+ 本层子文件夹：上一层的档案表不能一直挂在那儿。
@@ -4428,7 +4459,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
         _userLoaded = true;
         _sessionRoot = ""; // 散文件没有统一目录：别拿第一个文件的目录去覆盖记忆
-        _browseDir = null;
+        BrowseDir = null;
         ApplyItems(list, "拖放的文件");
     }
 
