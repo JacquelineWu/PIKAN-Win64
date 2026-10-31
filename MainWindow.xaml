@@ -102,13 +102,13 @@
                     </Grid>
 
                     <!-- 列标题：三列宽度与列表行绑的是同一组属性，永远对齐。
-                         第 4 列是折叠按钮，两种状态都在，收起后拿它展回来。 -->
+                         收起 / 展开按钮已经挪到左右分隔条的正中间（见下面的 ListCollapseBtn），
+                         这一行只剩纯文字，收起后也能整行留着，不必再给按钮腾格子。 -->
                     <Grid Grid.Row="2" Margin="14,0,12,4">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="{Binding NameColWidth}" />
                             <ColumnDefinition Width="{Binding SizeColWidth}" />
                             <ColumnDefinition Width="{Binding DateColWidth}" />
-                            <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <TextBlock Grid.Column="0" Text="档案名" FontSize="10" Foreground="#6b7488" />
                         <TextBlock Grid.Column="1" Text="大小" FontSize="10" Foreground="#6b7488"
@@ -116,14 +116,6 @@
                                    ToolTip="图片显示字节数（原始 byte）；文件夹显示内含全部文件的总容量" />
                         <TextBlock Grid.Column="2" Text="日期" FontSize="10" Foreground="#6b7488"
                                    HorizontalAlignment="Right" Margin="10,0,0,0" />
-                        <Button x:Name="ListCollapseBtn"
-                                Grid.Column="3"
-                                Content="{Binding ListCollapseGlyph}"
-                                ToolTip="{Binding ListCollapseTip}"
-                                Click="ActToggleList"
-                                Style="{StaticResource SortButton}"
-                                Width="24" Height="16" FontSize="10"
-                                Margin="4,0,0,0" Padding="0" />
                     </Grid>
 
                     <!-- 档案列表：虚拟化，只为屏幕上的几行建节点 -->
@@ -257,6 +249,43 @@
                           Cursor="SizeWE">
                 <GridSplitter.Opacity>0.6</GridSplitter.Opacity>
             </GridSplitter>
+
+            <!-- 收起 / 展开左栏的按钮：钉在分隔条的**垂直正中**，不再跟着列表抬头走。
+                 ① 它比分隔条宽（18 > 5），靠左右各 -6.5 的负 Margin 对称地溢出到两边面板上：
+                    Grid 里子元素「占格子」的宽度是 Width + Margin，一旦 Margin 为负，
+                    18 - 13 = 5 正好等于槽宽 —— 这条槽不必为了放按钮变粗，按钮却仍有能点的面积。
+                 ② Panel.ZIndex 5 是必须的：CanvasArea 排在它后面声明，同级后面画的盖前面的，
+                    不给层序的话按钮右半边会被预览区那块 #5F5F5F 底色糊掉（左半边没事，
+                    因为左边那块 Border 比它先声明）。
+                 ③ Visibility 跟 ChromeVisibility：全屏时分隔条整个消失，按钮要一起消失。 -->
+            <Button x:Name="ListCollapseBtn"
+                    Grid.Column="1"
+                    Panel.ZIndex="5"
+                    Content="{Binding ListCollapseGlyph}"
+                    ToolTip="{Binding ListCollapseTip}"
+                    Click="ActToggleList"
+                    Visibility="{Binding ChromeVisibility}"
+                    Width="18"
+                    Height="46"
+                    Margin="-6.5,0"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    FontSize="10"
+                    Padding="0">
+                <Button.Style>
+                    <!-- 平时压暗一点，鼠标移上去才实体化，避免在两张图中间横一条抢眼的块 -->
+                    <Style TargetType="Button" BasedOn="{StaticResource SortButton}">
+                        <Setter Property="Opacity" Value="0.7" />
+                        <Setter Property="Background" Value="#CC2A2F3A" />
+                        <Style.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Opacity" Value="1" />
+                                <Setter Property="Background" Value="#2A2F3A" />
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </Button.Style>
+            </Button>
 
             <!-- ==== 右侧：大图预览 ==== -->
             <Grid x:Name="CanvasArea"
