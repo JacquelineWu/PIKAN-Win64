@@ -135,5 +135,7 @@ certutil -hashfile PIKAN.exe SHA256
 dotnet build -c Release
 pwsh .\Publish.ps1            :: 编译 → 发布成 release-portable\PIKAN.exe → 签名
 pwsh .\Publish.ps1 -Portable  :: 出多文件目录形态（排障对照用）
-pwsh .\Release.ps1 -Tag v1.0.2 :: 发版：推 tag → 建两站 Release → 传附件 → 回下载校验
+:: 发版分两步：先只推代码与 tag，确认过再建发行版（发出去就撤不回来了）
+pwsh .\Release.ps1 -Tag v1.0.2 -SkipRelease          :: ① 编译 → 发布 → 签名 → 推 tag，两站都不建发行版
+pwsh .\Release.ps1 -Tag v1.0.2 -SkipPublish -SkipTag :: ② 确认要发之后，只建两站发行版 + 传附件 + 回下载校验
 ```

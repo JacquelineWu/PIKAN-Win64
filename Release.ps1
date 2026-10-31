@@ -12,6 +12,14 @@
 #   pwsh .\Release.ps1 -Tag v1.0.2 -Draft         # 发成草稿（GitHub；Gitee 无草稿概念，仅不发改名通知）
 #   pwsh .\Release.ps1 -Tag v1.0.2 -SkipGitee     # 只发 GitHub
 #
+# ★ 默认分两步走（2026-10-31 定的规矩）：代码和 tag 可以先推，
+#   **两站的发行版要等确认过再建**——一旦建了就公开可下载，撤不回来。
+#     ① pwsh .\Release.ps1 -Tag v1.0.2 -SkipRelease
+#        编译 → 发布 → 签名 → 算哈希 → 推 tag 到两站。**不建任何发行版、不传附件。**
+#     ② pwsh .\Release.ps1 -Tag v1.0.2 -SkipPublish -SkipTag
+#        确认要发之后，只做建发行版 + 传附件 + 回下载校验（exe 与 tag 都是现成的）。
+#   -SkipRelease 与 -SkipTag 只是把各自那一段跳过，其余步骤照跑，两个一起给就是「什么都不动」。
+#
 # Gitee 令牌的三种给法（优先级从高到低）：
 #   -GiteeToken (Read-Host -AsSecureString 提示也走这条路)
 #   $env:GITEE_TOKEN
@@ -37,6 +45,11 @@ param(
     [SecureString] $GiteeToken,
 
     [switch] $SkipPublish,
+    # 只做到「推 tag」为止：不建两站发行版、不传附件、不回下载校验。
+    # 发版要等确认，所以这一步是常态用法，不是应急开关。
+    [switch] $SkipRelease,
+    # tag 已经打过并推过了：跳过建 tag / 推 tag（分支该推还是推），只补建发行版。
+    [switch] $SkipTag,
     [switch] $NoSign,
     [switch] $NoCert,
     [switch] $AutoNotes,
@@ -140,7 +153,11 @@ if (-not $SkipGitHub) {
     Ok 'gh 已登录'
 }
 
-if (-not $SkipGitee) {
+# 只有真要动 Gitee 时才碰令牌：建发行版（step 6）或 -Force 清理旧发行版（step 4）才用得上。
+# -SkipRelease 且不带 -Force 时一步都不用，这里要是照旧去要令牌，脚本会卡在交互输入上。
+$needGitee = -not $SkipGitee -and (-not $SkipRelease -or $Force)
+
+if ($needGitee) {
     if (-not $GiteeRepo) { $GiteeRepo = Get-RemoteSlug 'gitee' }
     Info "Gitee  仓库：$GiteeRepo"
 
@@ -149,9 +166,15 @@ if (-not $SkipGitee) {
     $plain = Convert-SecureStringToPlain $GiteeToken
     if (-not $plain -and $env:GITEE_TOKEN) { $plain = $env:GITEE_TOKEN; Info '令牌来源：$env:GITEE_TOKEN' }
     if (-not $plain) {
-        $sec = Read-Host 'Gitee 私人令牌（需要 projects 权限，输入不回显）' -AsSecureString
-        $plain = Convert-SecureStringToPlain $sec
-        Info '令牌来源：交互式输入'
+        if ($DryRun) {
+            $plain = 'dryrun-token-placeholder'
+            Info '令牌来源：DryRun 占位（预演不会真去调 Gitee）'
+        }
+        else {
+            $sec = Read-Host 'Gitee 私人令牌（需要 projects 权限，输入不回显）' -AsSecureString
+            $plain = Convert-SecureStringToPlain $sec
+            Info '令牌来源：交互式输入'
+        }
     }
     if (-not $plain) { Die '没有 Gitee 令牌。只发 GitHub 就加 -SkipGitee。' }
 
@@ -189,22 +212,26 @@ $localTag = Invoke-Git @('tag', '-l', $Tag) -AllowFail
 if ($localTag) { $tagExists['__local'] = $true }
 
 foreach ($k in $tagExists.Keys) {
-    if ($tagExists[$k]) {
-        if (-not $Force) { Die "$k 上已经有 tag $Tag 了。换个 tag，或者加 -Force -Yes 覆盖。" }
-        Warn "$k 上已有 tag $Tag，-Force 将覆盖"
-    }
+    if (-not $tagExists[$k]) { continue }
+
+    # -SkipTag 就是「tag 已经打过了」的意思，这里不该再当成错误拦下来
+    if (-not $doTag) { Info "$k 上已有 tag $Tag（-SkipTag，复用）"; continue }
+
+    if (-not $Force) { Die "$k 上已经有 tag $Tag 了。换个 tag，或者加 -Force -Yes 覆盖。" }
+    Warn "$k 上已有 tag $Tag，-Force 将覆盖"
 }
 
 $certSuffix = if ($Cert -and (Test-Path -LiteralPath $Cert)) { " + $(Split-Path $Cert -Leaf)" } else { '' }
 $plan = @(
-    "tag       : $Tag → commit $((Invoke-Git @('rev-parse', '--short', 'HEAD')).Trim())",
+    "tag       : $Tag → commit $((Invoke-Git @('rev-parse', '--short', 'HEAD')).Trim())$(if ($SkipTag) { '（tag 本身跳过）' })",
     "exe       : $Exe",
     "标题      : $Title",
-    "GitHub    : $(if ($SkipGitHub) { '跳过' } else { $GitHubRepo })",
-    "Gitee     : $(if ($SkipGitee) { '跳过' } else { $GiteeRepo })",
-    "附件      : PIKAN.exe$certSuffix",
+    "发行版    : $(if ($SkipRelease) { '★ 不建（-SkipRelease）—— 只推代码与 tag，等确认' } else { '创建并传附件' })",
+    "GitHub    : $(if ($SkipRelease) { '不建发行版' } elseif ($SkipGitHub) { '跳过' } else { $GitHubRepo })",
+    "Gitee     : $(if ($SkipRelease) { '不建发行版' } elseif ($SkipGitee) { '跳过' } else { $GiteeRepo })",
+    "附件      : $(if ($SkipRelease) { '不传' } else { "PIKAN.exe$certSuffix" })",
     "草稿      : $([bool]$Draft)",
-    "回下载校验: $(-not $SkipVerify)"
+    "回下载校验: $(if ($SkipRelease) { 'False（无附件）' } else { -not $SkipVerify })"
 )
 Write-Host "`n  ── 发版计划 ──" -ForegroundColor White
 $plan | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
@@ -295,13 +322,14 @@ Ok "正文 $($body.Length) 字符 → $($([IO.Path]::GetFileName($notesFile)))"
 
 # ---------------------------------------------------------------- [4/7] tag 推送
 
-Step '4' "打 tag $Tag 并推送两个远端"
+$doTag = -not $SkipTag
+Step '4' $(if ($doTag) { "打 tag $Tag 并推送两个远端" } else { "推送分支（tag 跳过：-SkipTag）" })
 
 # -Force 时先把两站上**同名的旧 Release 删掉**，再去动 tag。顺序反了会出事：
 # Release 是挂在 tag 上的，先删 tag 会让 GitHub 把它降级成「untagged」草稿
 # （2026-10-31 首发 v1.0.1 就是这么踩的）—— 附件虽然传上去了，
 # download/<tag>/xxx 这条路径却直接 404，等于发了个残版本。
-if ($Force) {
+if ($Force -and $doTag) {
     if (-not $SkipGitHub) {
         & gh release view $Tag -R $GitHubRepo 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) {
@@ -332,7 +360,7 @@ if ($Force) {
     }
 }
 
-if ($Force) {
+if ($Force -and $doTag) {
     foreach ($r in $tagExists.Keys) {
         if ($r -eq '__local' -or -not $tagExists[$r]) { continue }
         Info "删远端旧 tag：$r"
@@ -341,14 +369,26 @@ if ($Force) {
     if ($tagExists['__local']) { Invoke-Git @('tag', '-d', $Tag) -AllowFail | Out-Null }
 }
 
-if (-not (Invoke-Git @('tag', '-l', $Tag))) {
+if (-not $doTag) {
+    Info "tag $Tag 保持原样（-SkipTag）"
+
+    # Gitee 建发行版要求远端**先有**这个 tag。跳过打 tag 却远端没有的话，step 6 会失败，
+    # 与其等到上传那一步才报错，不如这里先说一声。
+    foreach ($r in @('origin', 'gitee')) {
+        if ($r -eq 'origin' -and ($SkipGitHub -or $SkipRelease)) { continue }
+        if ($r -eq 'gitee' -and ($SkipGitee -or $SkipRelease)) { continue }
+        $has = Invoke-Git @('ls-remote', '--tags', $r, "refs/tags/$Tag") -AllowFail
+        if ($has -notmatch "refs/tags/$([regex]::Escape($Tag))$") { Warn "$r 上还没有 tag $Tag，建发行版会失败" }
+    }
+}
+elseif (-not (Invoke-Git @('tag', '-l', $Tag))) {
     Invoke-Git @('tag', '-a', $Tag, '-m', "PIKAN $Tag")
     Ok "已建附注 tag $Tag"
 }
 else { Info "本地 tag $Tag 已存在，复用" }
 
 # 远端明明已经有同名 tag 却走到这里，说明删除失败或别人刚推同名 tag
-if (-not $Force) {
+if (-not $Force -and $doTag) {
     foreach ($r in @('origin', 'gitee')) {
         if ($r -eq 'origin' -and $SkipGitHub) { continue }
         if ($r -eq 'gitee' -and $SkipGitee) { continue }
@@ -380,14 +420,20 @@ foreach ($r in $pushTargets) {
     }
     else { Info "拿不到 $r/$Branch 的对比基准，跳过分支推送（tag 仍会推）" }
 
-    Invoke-Git @('push', $r, $Tag)
-    Ok "已推 tag $Tag → $r"
+    if ($doTag) {
+        Invoke-Git @('push', $r, $Tag)
+        Ok "已推 tag $Tag → $r"
+    }
+    else { Info "tag $Tag 不推（-SkipTag）" }
 }
 
 # ---------------------------------------------------------------- [5/7] GitHub
 
 $ghUrl = $null
-if ($SkipGitHub) {
+if ($SkipRelease) {
+    Step '5' 'GitHub Release（跳过：-SkipRelease，等确认后再发）'
+}
+elseif ($SkipGitHub) {
     Step '5' 'GitHub Release（跳过）'
 }
 else {
@@ -442,7 +488,10 @@ else {
 # ---------------------------------------------------------------- [6/7] Gitee
 
 $geeUrl = $null
-if ($SkipGitee) {
+if ($SkipRelease) {
+    Step '6' 'Gitee 发行版（跳过：-SkipRelease，等确认后再发）'
+}
+elseif ($SkipGitee) {
     Step '6' 'Gitee 发行版（跳过）'
 }
 else {
@@ -538,7 +587,10 @@ else {
 
 Step '7' '回下载校验 SHA256'
 
-if ($SkipVerify) {
+if ($SkipRelease) {
+    Info '跳过（没建发行版，无附件可校验）'
+}
+elseif ($SkipVerify) {
     Info '跳过（-SkipVerify）'
 }
 else {
@@ -562,8 +614,15 @@ else {
 
 if ($notesFile) { Remove-Item -LiteralPath $notesFile -Force -ErrorAction SilentlyContinue }
 
-Write-Host "`n完成。$Tag 已发出：" -ForegroundColor Green
-if ($ghUrl) { Write-Host "  GitHub  $ghUrl" -ForegroundColor White }
-if ($geeUrl) { Write-Host "  Gitee   $geeUrl" -ForegroundColor White }
-Write-Host "  SHA256  $sha" -ForegroundColor DarkGray
-Write-Host "`n记得去 https://gitee.com/profile/personal_access_tokens 把这次用的令牌删掉。" -ForegroundColor Yellow
+if ($SkipRelease) {
+    Write-Host "`n完成。$Tag 的代码与 tag 已推到两站，**没有建发行版**。" -ForegroundColor Green
+    Write-Host "  确认要发时再跑一次（exe 与 tag 都是现成的，不用重新发布）：" -ForegroundColor DarkGray
+    Write-Host "    pwsh .\Release.ps1 -Tag $Tag -SkipPublish -SkipTag" -ForegroundColor White
+}
+else {
+    Write-Host "`n完成。$Tag 已发出：" -ForegroundColor Green
+    if ($ghUrl) { Write-Host "  GitHub  $ghUrl" -ForegroundColor White }
+    if ($geeUrl) { Write-Host "  Gitee   $geeUrl" -ForegroundColor White }
+    Write-Host "  SHA256  $sha" -ForegroundColor DarkGray
+    Write-Host "`n记得去 https://gitee.com/profile/personal_access_tokens 把这次用的令牌删掉。" -ForegroundColor Yellow
+}
